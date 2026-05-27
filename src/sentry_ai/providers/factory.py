@@ -3,10 +3,11 @@
 from sentry_ai.providers.base import VLMProvider
 from sentry_ai.providers.minicpm_v import MiniCPMVProvider
 from sentry_ai.providers.ollama_client import OllamaClient
+from sentry_ai.providers.qwen_vl import QwenVLProvider
 
 _REGISTRY: dict[str, type] = {
     "minicpm-v-2.6": MiniCPMVProvider,
-    # Qwen2.5-VL will register here in Session 2
+    "qwen2.5-vl-7b": QwenVLProvider,
 }
 
 
