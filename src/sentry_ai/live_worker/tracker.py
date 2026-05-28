@@ -19,6 +19,7 @@ class TrackedDetection:
     box: tuple[float, float, float, float]
     score: float
     tracker_id: int
+    keypoints: NDArray[np.float32] | None = None
 
 
 class ByteTrackWrapper:
@@ -63,17 +64,33 @@ class ByteTrackWrapper:
         out: list[TrackedDetection] = []
         if tracked.tracker_id is None:
             return out
+        # ByteTrack may reorder + drop detections, so we re-match by IoU to
+        # carry the original keypoints through. Cheap nearest-center match.
         for i in range(len(tracked)):
             tid = tracked.tracker_id[i]
             if tid is None or tid < 0:
                 continue
             x1, y1, x2, y2 = tracked.xyxy[i].tolist()
             score = float(tracked.confidence[i]) if tracked.confidence is not None else 0.0
+
+            # Find closest original detection by center distance
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            best_idx, best_dist = -1, float("inf")
+            for j, d in enumerate(detections):
+                dcx = (d.box[0] + d.box[2]) / 2
+                dcy = (d.box[1] + d.box[3]) / 2
+                dist = (cx - dcx) ** 2 + (cy - dcy) ** 2
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = j
+            kpts = detections[best_idx].keypoints if best_idx >= 0 else None
+
             out.append(
                 TrackedDetection(
                     box=(x1, y1, x2, y2),
                     score=score,
                     tracker_id=int(tid),
+                    keypoints=kpts,
                 ),
             )
         return out

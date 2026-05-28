@@ -32,6 +32,12 @@ PERSON_CLASS = 0
 class Detection:
     box: tuple[float, float, float, float]  # (x1, y1, x2, y2) pixels
     score: float                              # 0.0-1.0
+    # COCO-17 pose keypoints. Shape (17, 2) = [x, y] per joint.
+    # Order: nose, l_eye, r_eye, l_ear, r_ear, l_shoulder, r_shoulder, l_elbow,
+    # r_elbow, l_wrist, r_wrist, l_hip, r_hip, l_knee, r_knee, l_ankle, r_ankle.
+    # Values are pixel coords in the input frame; (0, 0) means "not detected".
+    # None if model is not pose-capable (defensive default).
+    keypoints: NDArray[np.float32] | None = None
 
 
 def _load_model(weights: str = "yolo11n-pose.pt") -> tuple[object, str]:
@@ -102,10 +108,22 @@ class YoloPoseRunner:
         xyxy = boxes.xyxy.cpu().numpy()       # (N, 4)
         conf = boxes.conf.cpu().numpy()       # (N,)
 
+        # Pose keypoints (only present on pose models). r.keypoints.xy: (N, 17, 2)
+        kpts_xy: NDArray[np.float32] | None = None
+        if r.keypoints is not None and r.keypoints.xy is not None:
+            kpts_xy = r.keypoints.xy.cpu().numpy().astype(np.float32)
+
         out: list[Detection] = []
         for i in range(xyxy.shape[0]):
             x1, y1, x2, y2 = xyxy[i].tolist()
-            out.append(Detection(box=(x1, y1, x2, y2), score=float(conf[i])))
+            kp = kpts_xy[i] if kpts_xy is not None and i < kpts_xy.shape[0] else None
+            out.append(
+                Detection(
+                    box=(x1, y1, x2, y2),
+                    score=float(conf[i]),
+                    keypoints=kp,
+                ),
+            )
         return out
 
 

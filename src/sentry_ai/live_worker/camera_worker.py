@@ -14,10 +14,13 @@ import time
 from collections import deque
 
 import cv2
+import numpy as np
+from numpy.typing import NDArray
 
+from sentry_ai.live_worker.behavior import BehaviorScorer
 from sentry_ai.live_worker.emitter import MetadataEmitter
 from sentry_ai.live_worker.schemas import FrameMetadata, TrackPayload
-from sentry_ai.live_worker.tracker import ByteTrackWrapper
+from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
 from sentry_ai.live_worker.yolo_runner import YoloPoseRunner
 from sentry_ai.logging_setup import get_logger
 
@@ -55,6 +58,14 @@ class CameraWorker:
         # `LiveStartRequest` validation can happen без CUDA cost
         self._yolo: YoloPoseRunner | None = None
         self._tracker: ByteTrackWrapper | None = None
+        self._scorer: BehaviorScorer | None = None
+        self._last_cleanup_frame = 0
+
+        # Latest annotated frame for /v1/live/snapshot/{cam} debug endpoint.
+        # Stored as JPEG bytes to avoid GIL contention; updated under lock.
+        self._snapshot_lock = threading.Lock()
+        self._latest_snapshot_jpeg: bytes | None = None
+        self._latest_snapshot_ts: float = 0.0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -104,6 +115,13 @@ class CameraWorker:
     def last_error(self) -> str | None:
         return self._last_error
 
+    def latest_snapshot(self) -> tuple[bytes, float] | None:
+        """Return (jpeg_bytes, unix_ts) of most recent annotated frame, or None."""
+        with self._snapshot_lock:
+            if self._latest_snapshot_jpeg is None:
+                return None
+            return self._latest_snapshot_jpeg, self._latest_snapshot_ts
+
     # === Worker loop ===
 
     def _run(self) -> None:
@@ -112,6 +130,7 @@ class CameraWorker:
             self._yolo = YoloPoseRunner(conf=self.yolo_conf)
             # ByteTrack frame_rate hint = effective post-skip FPS target
             self._tracker = ByteTrackWrapper(frame_rate=max(1, 30 // self.frame_skip))
+            self._scorer = BehaviorScorer()
         except Exception as e:
             self._last_error = f"init failed: {e}"
             log.exception("camera.init_failed", camera_id=self.camera_id)
@@ -145,7 +164,7 @@ class CameraWorker:
                     continue
 
                 try:
-                    self._process_frame(frame)
+                    self._process_frame(frame.astype(np.uint8, copy=False))
                 except Exception as e:  # noqa: BLE001
                     self._last_error = f"process failed: {e}"
                     log.exception(
@@ -170,9 +189,10 @@ class CameraWorker:
         log.info("camera.open_ok", camera_id=self.camera_id)
         return cap
 
-    def _process_frame(self, frame_bgr) -> None:  # type: ignore[no-untyped-def]
+    def _process_frame(self, frame_bgr: NDArray[np.uint8]) -> None:
         assert self._yolo is not None
         assert self._tracker is not None
+        assert self._scorer is not None
 
         h, w = frame_bgr.shape[:2]
         detections = self._yolo.detect_persons(frame_bgr)
@@ -180,14 +200,27 @@ class CameraWorker:
         self._inference_times.append(time.monotonic())
         self._detections_total += len(detections)
 
-        tracks_payload = [
-            TrackPayload(
-                person_id=t.tracker_id,
-                box=t.box,
-                det_confidence=t.score,
+        # 6-dim behavior scoring per tracked person → risk_pct + color
+        tracks_payload: list[TrackPayload] = []
+        for t in tracked:
+            person_h = max(1.0, t.box[3] - t.box[1])
+            risk_pct, color, _reasons = self._scorer.score(
+                t.tracker_id, t.keypoints, person_h,
             )
-            for t in tracked
-        ]
+            tracks_payload.append(
+                TrackPayload(
+                    person_id=t.tracker_id,
+                    box=t.box,
+                    det_confidence=t.score,
+                    risk_pct=risk_pct,
+                    color=color,
+                ),
+            )
+
+        # Periodic stale-track cleanup (~once per second @ 5 FPS)
+        if self._frames_total - self._last_cleanup_frame > 30:
+            self._scorer.cleanup_stale()
+            self._last_cleanup_frame = self._frames_total
 
         payload = FrameMetadata(
             camera_id=self.camera_id,
@@ -199,6 +232,66 @@ class CameraWorker:
             tracks=tracks_payload,
         )
         self._emitter.enqueue(payload)
+
+        # Update annotated snapshot for /v1/live/snapshot/{cam} debug viewer
+        self._update_snapshot(frame_bgr, tracked, tracks_payload)
+
+    def _update_snapshot(
+        self,
+        frame_bgr: NDArray[np.uint8],
+        tracked: list[TrackedDetection],
+        tracks_payload: list[TrackPayload],
+    ) -> None:
+        """Draw bboxes onto a copy of the frame and JPEG-encode for the debug endpoint."""
+        annotated = frame_bgr.copy()
+        # tracked and tracks_payload are aligned 1:1 by build order in _process_frame
+        for t, p in zip(tracked, tracks_payload, strict=False):
+            x1, y1, x2, y2 = (int(v) for v in t.box)
+            # Color in BGR (cv2) — green / yellow / red per risk band
+            if p.color == "red":
+                bgr = (0, 0, 255)
+            elif p.color == "yellow":
+                bgr = (0, 230, 230)
+            else:
+                bgr = (0, 255, 0)
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), bgr, 3)
+            label = f"#{t.tracker_id}  Risk: {p.risk_pct:.0f}%"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), bgr, -1)
+            cv2.putText(
+                annotated,
+                label,
+                (x1 + 2, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+        # Header overlay: cam + frame # + FPS + det count
+        header = (
+            f"{self.camera_id}  frame={self._frames_total}  "
+            f"FPS={self.fps_inference:.1f}  persons={len(tracked)}"
+        )
+        cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 30), (0, 0, 0), -1)
+        cv2.putText(
+            annotated,
+            header,
+            (8, 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+        ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return
+        with self._snapshot_lock:
+            self._latest_snapshot_jpeg = buf.tobytes()
+            self._latest_snapshot_ts = time.time()
 
 
 def _fps_from_window(times: deque[float]) -> float:
