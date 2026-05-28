@@ -10,10 +10,27 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 from sentry_ai import __version__
 from sentry_ai.api.v1 import health as health_v1
+from sentry_ai.api.v1 import live as live_v1
 from sentry_ai.api.v1 import verify as verify_v1
 from sentry_ai.dependencies import close_client
+from sentry_ai.live_worker import get_manager
 from sentry_ai.logging_setup import configure_logging, get_logger
 from sentry_ai.settings import get_settings
+
+
+def _parse_auto_start(spec: str) -> list[tuple[str, str]]:
+    """Parse `cam1=url1,cam2=url2` env value into [(camera_id, rtsp_url), ...]."""
+    out: list[tuple[str, str]] = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            continue
+        cam_id, _, url = item.partition("=")
+        cam_id = cam_id.strip()
+        url = url.strip()
+        if cam_id and url:
+            out.append((cam_id, url))
+    return out
 
 
 @asynccontextmanager
@@ -28,8 +45,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         ollama_base_url=settings.ollama_base_url,
         default_provider=settings.default_provider,
     )
+
+    # M1-LIVE L2: auto-start live workers from settings
+    if settings.live_auto_start:
+        manager = get_manager()
+        for cam_id, rtsp_url in _parse_auto_start(settings.live_auto_start):
+            log.info("live.auto_start", camera_id=cam_id, rtsp_url=rtsp_url)
+            manager.start_camera(cam_id, rtsp_url, frame_skip=settings.live_frame_skip)
+
     yield
+
     log.info("stopping")
+    get_manager().stop_all()
     await close_client()
 
 
@@ -58,6 +85,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
     app.include_router(health_v1.router)
     app.include_router(verify_v1.router)
+    app.include_router(live_v1.router)
     return app
 
 

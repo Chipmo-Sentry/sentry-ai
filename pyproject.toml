@@ -17,6 +17,10 @@ dependencies = [
     "ffmpeg-python>=0.2.0,<0.3",
     "pillow>=10.0,<12.0",
     "jinja2>=3.1,<4.0",
+    # M1-LIVE L2: live per-camera worker (YOLO + tracker)
+    "ultralytics>=8.3,<9.0",         # YOLO11-pose, torch deps included
+    "supervision>=0.25,<1.0",        # ByteTrack + annotation utils
+    "opencv-python-headless>=4.10,<5.0",  # cv2.VideoCapture for RTSP pull
 ]
 
 [dependency-groups]
@@ -63,7 +67,7 @@ mypy_path = "src"
 packages = ["sentry_ai"]
 
 [[tool.mypy.overrides]]
-module = ["ffmpeg.*"]
+module = ["ffmpeg.*", "ultralytics.*", "supervision.*", "cv2.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

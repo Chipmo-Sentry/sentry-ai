@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     sentry_backend_url: str = "http://localhost:8000"
     sentry_backend_service_token: str = "dev-service-token"
 
+    # M1-LIVE L2: live worker auto-start
+    # Comma-separated list of `camera_id=rtsp_url` pairs. Empty = no auto-start.
+    # Example:
+    #   live_auto_start="cam1_hik=rtsp://localhost:8554/cam1_hik,cam2_unv=rtsp://localhost:8554/cam2_unv"
+    live_auto_start: str = ""
+    live_frame_skip: int = 3  # analyze every Nth frame (10 FPS on 30 FPS source)
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 
