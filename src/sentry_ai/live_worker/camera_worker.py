@@ -21,6 +21,7 @@ from sentry_ai.live_worker.behavior import BehaviorScorer
 from sentry_ai.live_worker.emitter import MetadataEmitter
 from sentry_ai.live_worker.schemas import FrameMetadata, TrackPayload
 from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
+from sentry_ai.live_worker.yolo_det import Item, YoloItemRunner
 from sentry_ai.live_worker.yolo_runner import YoloPoseRunner
 from sentry_ai.logging_setup import get_logger
 
@@ -57,9 +58,17 @@ class CameraWorker:
         # Lazy-init heavy components on first run (not on construct) so
         # `LiveStartRequest` validation can happen без CUDA cost
         self._yolo: YoloPoseRunner | None = None
+        self._item_runner: YoloItemRunner | None = None
         self._tracker: ByteTrackWrapper | None = None
         self._scorer: BehaviorScorer | None = None
         self._last_cleanup_frame = 0
+
+        # Item detection runs less frequently than pose (items don't move
+        # much — running per-frame doubles CPU cost for little gain).
+        # Default: every 5 inference cycles ≈ 1 FPS on a 5 FPS pose stream.
+        self._item_every_n = 5
+        self._inference_count = 0
+        self._cached_items: list[Item] = []
 
         # Config delivered by poller BEFORE scorer initializes — buffer and
         # apply once scorer is live (fixes config-poller race condition).
@@ -153,6 +162,7 @@ class CameraWorker:
         # Lazy heavy init inside the worker thread (avoid blocking the API call)
         try:
             self._yolo = YoloPoseRunner(conf=self.yolo_conf)
+            self._item_runner = YoloItemRunner(conf=0.40)
             # ByteTrack frame_rate hint = effective post-skip FPS target
             self._tracker = ByteTrackWrapper(frame_rate=max(1, 30 // self.frame_skip))
             self._scorer = BehaviorScorer()
@@ -223,6 +233,7 @@ class CameraWorker:
 
     def _process_frame(self, frame_bgr: NDArray[np.uint8]) -> None:
         assert self._yolo is not None
+        assert self._item_runner is not None
         assert self._tracker is not None
         assert self._scorer is not None
 
@@ -232,12 +243,20 @@ class CameraWorker:
         self._inference_times.append(time.monotonic())
         self._detections_total += len(detections)
 
+        # Item detection on every Nth inference cycle (items don't move much).
+        self._inference_count += 1
+        if self._inference_count % self._item_every_n == 0:
+            try:
+                self._cached_items = self._item_runner.detect_items(frame_bgr)
+            except Exception:  # noqa: BLE001
+                log.exception("camera.item_det_failed", camera_id=self.camera_id)
+
         # 6-dim behavior scoring per tracked person → risk_pct + color
         tracks_payload: list[TrackPayload] = []
         for t in tracked:
             person_h = max(1.0, t.box[3] - t.box[1])
             risk_pct, color, _reasons = self._scorer.score(
-                t.tracker_id, t.keypoints, person_h,
+                t.tracker_id, t.keypoints, person_h, items=self._cached_items,
             )
             tracks_payload.append(
                 TrackPayload(

@@ -36,6 +36,8 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from sentry_ai.live_worker.yolo_det import Item
+
 # === COCO-17 keypoint indices ===
 KP_L_EYE = 1
 KP_R_EYE = 2
@@ -127,8 +129,12 @@ class BehaviorScorer:
         tracker_id: int,
         keypoints: NDArray[np.float32] | None,
         person_h: float,
+        items: list[Item] | None = None,
     ) -> tuple[float, RiskColor, list[str]]:
         """Compute and update score for one tracked person. Thread-safe.
+
+        `items` is the list of nearby item detections (COCO model output, L4.5).
+        Pass None or [] to skip item_pickup logic — leaves `holding` unchanged.
 
         Returns (raw_score, color, list of triggered reasons this frame).
         score is unbounded (was previously clamped to 100); color comes from
@@ -149,7 +155,7 @@ class BehaviorScorer:
             delta = 0.0
             reasons: list[str] = []
             if keypoints is not None and len(keypoints) >= 17 and person_h > 0:
-                delta, reasons = self._analyze(state, keypoints, person_h)
+                delta, reasons = self._analyze(state, keypoints, person_h, items or [])
             state.score += delta
             if reasons:
                 state.last_reasons = reasons
@@ -174,6 +180,7 @@ class BehaviorScorer:
         state: TrackState,
         kps: NDArray[np.float32],
         person_h: float,
+        items: list[Item],
     ) -> tuple[float, list[str]]:
         l_eye = kps[KP_L_EYE]
         r_eye = kps[KP_R_EYE]
@@ -206,8 +213,24 @@ class BehaviorScorer:
                 delta += self.weights["looking_around"]
                 reasons.append("Орчноо харах")
 
-        # 2. Item pickup — SKIPPED in M1 (no shelf zones, no COCO det model).
-        #    L4.5 will add yolo11n.pt and per-camera shelf zone config.
+        # 2. Item pickup — wrist enters COCO-detected item bbox.
+        # Once fired, `holding=True` persists until track ages out, which
+        # in turn activates dims 5 (wrist_to_torso) and 6 (rapid_movement).
+        if items and not state.holding:
+            for wrist in (l_wrist, r_wrist):
+                if not _kp_valid(wrist):
+                    continue
+                matched: str | None = None
+                for it in items:
+                    ix1, iy1, ix2, iy2 = it.box
+                    if ix1 < wrist[0] < ix2 and iy1 < wrist[1] < iy2:
+                        matched = it.label
+                        break
+                if matched is not None:
+                    state.holding = True
+                    delta += self.weights["item_pickup"]
+                    reasons.append(f"{matched} авах")
+                    break
 
         # 3. Body block — shoulder width collapses (turning back to camera)
         if _kp_valid(l_shoulder) and _kp_valid(r_shoulder):
