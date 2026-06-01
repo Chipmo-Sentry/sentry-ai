@@ -21,7 +21,9 @@ class TrackPayload(BaseModel):
         description="(x1, y1, x2, y2) in source frame pixels",
     )
     det_confidence: float = Field(ge=0.0, le=1.0, description="YOLO detection score")
-    risk_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    # Accumulated risk score (NOT percent — thresholds are absolute, configured
+    # via /api/v1/behaviors). Kept name 'risk_pct' for backward compat in JSON.
+    risk_pct: float = Field(default=0.0, ge=0.0)
     color: RiskColor = Field(default="green")
 
 

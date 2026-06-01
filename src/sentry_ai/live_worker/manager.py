@@ -6,6 +6,7 @@ import threading
 from functools import lru_cache
 
 from sentry_ai.live_worker.camera_worker import CameraWorker
+from sentry_ai.live_worker.config_poller import get_config_poller
 from sentry_ai.live_worker.emitter import MetadataEmitter
 from sentry_ai.live_worker.schemas import LiveWorkerStatus
 from sentry_ai.logging_setup import get_logger
@@ -24,6 +25,7 @@ class LiveWorkerManager:
         with self._lock:
             if not self._emitter_started:
                 self._emitter.start()
+                get_config_poller().start()
                 self._emitter_started = True
 
             existing = self._workers.get(camera_id)
@@ -43,6 +45,13 @@ class LiveWorkerManager:
             worker.start()
             self._workers[camera_id] = worker
 
+            # Subscribe worker's scorer to live config updates (callbacks invoke
+            # synchronously on the poller thread — both methods are thread-safe).
+            get_config_poller().subscribe(
+                on_weights=worker.apply_weights,
+                on_thresholds=worker.apply_thresholds,
+            )
+
     def stop_camera(self, camera_id: str) -> bool:
         with self._lock:
             worker = self._workers.get(camera_id)
@@ -58,6 +67,7 @@ class LiveWorkerManager:
             self._workers.clear()
             if self._emitter_started:
                 self._emitter.stop()
+                get_config_poller().stop()
                 self._emitter_started = False
 
     def status(self) -> list[LiveWorkerStatus]:
@@ -79,6 +89,13 @@ class LiveWorkerManager:
     @property
     def emitter_stats(self) -> dict[str, int]:
         return self._emitter.stats
+
+    def snapshot(self, camera_id: str) -> tuple[bytes, float] | None:
+        with self._lock:
+            worker = self._workers.get(camera_id)
+            if worker is None:
+                return None
+            return worker.latest_snapshot()
 
 
 @lru_cache(maxsize=1)

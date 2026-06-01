@@ -60,17 +60,18 @@ SCORE_DECAY_IDLE = 0.98
 SCORE_DECAY_HOLDING = 0.999
 STALE_TRACK_SEC = 5.0
 
-# Risk color thresholds (matches REQUIREMENTS F4.7)
-RISK_GREEN_MAX = 30.0
-RISK_YELLOW_MAX = 70.0
+# Default ABSOLUTE accumulated-score thresholds (no longer percent).
+# Overridden at runtime by backend's /api/v1/behaviors config (live tuning).
+DEFAULT_GREEN_MAX = 5.0
+DEFAULT_YELLOW_MAX = 15.0
 
 RiskColor = Literal["green", "yellow", "red"]
 
 
-def classify_color(risk_pct: float) -> RiskColor:
-    if risk_pct < RISK_GREEN_MAX:
+def classify_color(score: float, green_max: float, yellow_max: float) -> RiskColor:
+    if score < green_max:
         return "green"
-    if risk_pct < RISK_YELLOW_MAX:
+    if score < yellow_max:
         return "yellow"
     return "red"
 
@@ -105,13 +106,21 @@ class BehaviorScorer:
         self.weights = dict(DEFAULT_WEIGHTS)
         if weights:
             self.weights.update(weights)
+        self.green_max: float = DEFAULT_GREEN_MAX
+        self.yellow_max: float = DEFAULT_YELLOW_MAX
         self._states: dict[int, TrackState] = {}
         self._lock = threading.Lock()
 
     def update_weights(self, new_weights: dict[str, float]) -> None:
-        """Hot-update weights (used by per-camera tuning UI in next task)."""
+        """Hot-update weights from backend behavior config."""
         with self._lock:
             self.weights.update(new_weights)
+
+    def update_thresholds(self, green_max: float, yellow_max: float) -> None:
+        """Hot-update color band thresholds from backend behavior config."""
+        with self._lock:
+            self.green_max = green_max
+            self.yellow_max = yellow_max
 
     def score(
         self,
@@ -121,7 +130,9 @@ class BehaviorScorer:
     ) -> tuple[float, RiskColor, list[str]]:
         """Compute and update score for one tracked person. Thread-safe.
 
-        Returns (risk_pct 0-100, color, list of triggered reasons this frame).
+        Returns (raw_score, color, list of triggered reasons this frame).
+        score is unbounded (was previously clamped to 100); color comes from
+        absolute thresholds (green_max / yellow_max).
         """
         with self._lock:
             state = self._states.get(tracker_id)
@@ -143,8 +154,7 @@ class BehaviorScorer:
             if reasons:
                 state.last_reasons = reasons
 
-            risk_pct = min(100.0, state.score)
-            return risk_pct, classify_color(risk_pct), state.last_reasons
+            return state.score, classify_color(state.score, self.green_max, self.yellow_max), state.last_reasons
 
     def cleanup_stale(self) -> int:
         """Drop tracker states unseen for STALE_TRACK_SEC. Returns count removed."""

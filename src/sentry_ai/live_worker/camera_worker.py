@@ -115,6 +115,16 @@ class CameraWorker:
     def last_error(self) -> str | None:
         return self._last_error
 
+    def apply_weights(self, weights: dict[str, float]) -> None:
+        """Hot-update behavior scorer weights from poller."""
+        if self._scorer is not None:
+            self._scorer.update_weights(weights)
+
+    def apply_thresholds(self, green_max: float, yellow_max: float) -> None:
+        """Hot-update color band thresholds from poller."""
+        if self._scorer is not None:
+            self._scorer.update_thresholds(green_max, yellow_max)
+
     def latest_snapshot(self) -> tuple[bytes, float] | None:
         """Return (jpeg_bytes, unix_ts) of most recent annotated frame, or None."""
         with self._snapshot_lock:
@@ -255,7 +265,8 @@ class CameraWorker:
             else:
                 bgr = (0, 255, 0)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), bgr, 3)
-            label = f"#{t.tracker_id}  Risk: {p.risk_pct:.0f}%"
+            # Raw accumulated score (no % — thresholds are absolute, см. behaviors UI)
+            label = f"#{t.tracker_id}  Risk: {p.risk_pct:.1f}"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), bgr, -1)
             cv2.putText(
