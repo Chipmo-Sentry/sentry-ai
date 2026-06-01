@@ -61,6 +61,11 @@ class CameraWorker:
         self._scorer: BehaviorScorer | None = None
         self._last_cleanup_frame = 0
 
+        # Config delivered by poller BEFORE scorer initializes — buffer and
+        # apply once scorer is live (fixes config-poller race condition).
+        self._pending_weights: dict[str, float] | None = None
+        self._pending_thresholds: tuple[float, float] | None = None
+
         # Latest annotated frame for /v1/live/snapshot/{cam} debug endpoint.
         # Stored as JPEG bytes to avoid GIL contention; updated under lock.
         self._snapshot_lock = threading.Lock()
@@ -116,14 +121,24 @@ class CameraWorker:
         return self._last_error
 
     def apply_weights(self, weights: dict[str, float]) -> None:
-        """Hot-update behavior scorer weights from poller."""
+        """Hot-update behavior scorer weights from poller.
+
+        If the scorer hasn't initialized yet (worker thread still warming up
+        YOLO), buffer the values and apply on init. The poller may not re-fire
+        the same config again, so dropping here would mean we run on hardcoded
+        defaults until DB changes.
+        """
         if self._scorer is not None:
             self._scorer.update_weights(weights)
+        else:
+            self._pending_weights = dict(weights)
 
     def apply_thresholds(self, green_max: float, yellow_max: float) -> None:
-        """Hot-update color band thresholds from poller."""
+        """Hot-update color band thresholds from poller. Buffers if scorer not ready."""
         if self._scorer is not None:
             self._scorer.update_thresholds(green_max, yellow_max)
+        else:
+            self._pending_thresholds = (green_max, yellow_max)
 
     def latest_snapshot(self) -> tuple[bytes, float] | None:
         """Return (jpeg_bytes, unix_ts) of most recent annotated frame, or None."""
@@ -141,6 +156,13 @@ class CameraWorker:
             # ByteTrack frame_rate hint = effective post-skip FPS target
             self._tracker = ByteTrackWrapper(frame_rate=max(1, 30 // self.frame_skip))
             self._scorer = BehaviorScorer()
+            # Apply any config the poller delivered while we were initializing.
+            if self._pending_weights is not None:
+                self._scorer.update_weights(self._pending_weights)
+                self._pending_weights = None
+            if self._pending_thresholds is not None:
+                self._scorer.update_thresholds(*self._pending_thresholds)
+                self._pending_thresholds = None
         except Exception as e:
             self._last_error = f"init failed: {e}"
             log.exception("camera.init_failed", camera_id=self.camera_id)

@@ -76,7 +76,7 @@ class BehaviorConfigPoller:
             try:
                 self._fetch_and_dispatch(url)
                 delay = POLL_INTERVAL_SEC
-            except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
+            except (httpx.HTTPError, ValueError) as e:
                 # Don't spam — log every failed poll at warning only
                 log.warning("config_poller.fetch_failed", error=str(e), retry_in=delay)
                 delay = min(delay * 2, POLL_INTERVAL_SEC)
