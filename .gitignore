@@ -34,3 +34,6 @@ logs/
 Thumbs.db
 yolo11n-pose.pt
 yolo11n.pt
+
+# Server installer — CI-downloaded binaries (never commit)
+installer/bin/

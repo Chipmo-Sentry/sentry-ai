@@ -1,0 +1,46 @@
+# Default MediaMTX config bundled with the Chipmo Sentry AI server installer.
+# Camera paths are added dynamically by the backend via the control API (:9997),
+# so no static paths are needed here. Edit on the installed machine if required
+# (it is copied to <install>\bin\mediamtx.yml, only if not already present).
+
+logLevel: info
+logDestinations: [stdout, file]
+logFile: mediamtx.log
+
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+
+# Control API - the Railway backend calls this (expose via cloudflared as
+# mtxapi.*). PROTECT IT: set MTX_API_USER / MTX_API_PASS via env on this host.
+api: yes
+apiAddress: 127.0.0.1:9997
+
+metrics: no
+
+# RTSP - sentry-ai's live worker subscribes here (MediaMTX fan-out point).
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+# HLS - frontend /live fallback playback.
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+
+# WebRTC / WHEP - frontend /live low-latency playback.
+webrtc: yes
+webrtcAddress: :8889
+
+# Record breach clips to disk (24h rotation). The Predator-side cut control
+# plane reads from here (see docs - sentry-ingest /v1/cut, TODO).
+pathDefaults:
+  record: yes
+  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordSegmentDuration: 1h
+  recordDeleteAfter: 24h

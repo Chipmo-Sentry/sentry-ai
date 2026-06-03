@@ -1,0 +1,28 @@
+# cloudflared tunnel config for the Chipmo Sentry AI server.
+# Copy to  <install>\config\cloudflared.yml  and fill in.
+#
+# One-time setup (run once, signed in to your Cloudflare account):
+#   cloudflared tunnel login
+#   cloudflared tunnel create sentry-ingest
+#   cloudflared tunnel route dns sentry-ingest media.sentry.chipmo.mn
+#   cloudflared tunnel route dns sentry-ingest ai.sentry.chipmo.mn
+#   cloudflared tunnel route dns sentry-ingest mtxapi.sentry.chipmo.mn
+# Then re-run the service installer with -TunnelName sentry-ingest.
+
+tunnel: sentry-ingest
+credentials-file: C:\Users\YOU\.cloudflared\<TUNNEL-UUID>.json
+
+ingress:
+  # MediaMTX HLS + WebRTC/WHEP playback for the frontend /live page.
+  - hostname: media.sentry.chipmo.mn
+    service: http://localhost:8888
+  - hostname: whep.sentry.chipmo.mn
+    service: http://localhost:8889
+  # sentry-ai live worker control - the Railway backend POSTs /v1/live/start.
+  - hostname: ai.sentry.chipmo.mn
+    service: http://localhost:8001
+  # MediaMTX control API (:9997) - backend adds/removes camera paths.
+  # PROTECT IT with MediaMTX api auth.
+  - hostname: mtxapi.sentry.chipmo.mn
+    service: http://localhost:9997
+  - service: http_status:404

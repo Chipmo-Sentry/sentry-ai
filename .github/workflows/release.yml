@@ -1,0 +1,83 @@
+name: release
+
+# Build the Windows server installer and publish it to a GitHub Release on a
+# version tag. Produces ChipmoSentryAi-Setup.exe — one installer that sets up
+# sentry-ai + MediaMTX + cloudflared as Windows services on the user's machine
+# (Ollama is the user's own install; the installer just points at it).
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag must match src/sentry_ai/__init__.py __version__.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  MEDIAMTX_VERSION: "1.9.3"   # https://github.com/bluenviron/mediamtx/releases
+  NSSM_VERSION: "2.24"        # https://nssm.cc/release/
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify tag matches __version__
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $code = (Select-String -Path src/sentry_ai/__init__.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Host "tag=$tag  __version__=$code"
+          if ($tag -ne $code) {
+            Write-Error "Tag '$tag' != __version__ '$code'. Bump src/sentry_ai/__init__.py first."
+            exit 1
+          }
+
+      - name: Download bundled binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path installer\bin | Out-Null
+
+          # MediaMTX (zip -> mediamtx.exe)
+          $mtx = "mediamtx_v$env:MEDIAMTX_VERSION`_windows_amd64.zip"
+          $mtxUrl = "https://github.com/bluenviron/mediamtx/releases/download/v$env:MEDIAMTX_VERSION/$mtx"
+          Write-Host "Downloading $mtxUrl"
+          Invoke-WebRequest -Uri $mtxUrl -OutFile mtx.zip
+          Expand-Archive mtx.zip -DestinationPath mtx -Force
+          Copy-Item mtx\mediamtx.exe installer\bin\mediamtx.exe
+
+          # cloudflared (single exe, latest stable)
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile installer\bin\cloudflared.exe
+
+          # NSSM (zip -> win64\nssm.exe)
+          Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-$env:NSSM_VERSION.zip" -OutFile nssm.zip
+          Expand-Archive nssm.zip -DestinationPath nssm -Force
+          Copy-Item "nssm\nssm-$env:NSSM_VERSION\win64\nssm.exe" installer\bin\nssm.exe
+
+          Get-ChildItem installer\bin | Select-Object Name, Length
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          & "$iscc" "/DAppVersion=$ver" "installer\sentry-ai-server.iss"
+          if (-not (Test-Path "dist\ChipmoSentryAi-Setup.exe")) {
+            Write-Error "Inno Setup produced no dist\ChipmoSentryAi-Setup.exe"
+            exit 1
+          }
+          Get-Item "dist\ChipmoSentryAi-Setup.exe" | Select-Object Name, Length
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ChipmoSentryAi-Setup.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
