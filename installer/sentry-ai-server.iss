@@ -61,6 +61,8 @@ Name: "{group}\Chipmo Sentry AI - Status"; Filename: "powershell.exe"; \
   Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\server-control.ps1"" status"
 Name: "{group}\Re-run setup"; Filename: "powershell.exe"; \
   Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\setup-server.ps1"""
+Name: "{group}\Check for updates"; Filename: "powershell.exe"; \
+  Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\update.ps1"""
 Name: "{group}\Uninstall"; Filename: "{uninstallexe}"
 
 [Run]
@@ -93,6 +95,38 @@ begin
   CfgPage.Add('cloudflared tunnel name (optional - leave blank to skip):', False);
   CfgPage.Values[2] := 'http://localhost:11434';
   CfgPage.Values[3] := '';
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+var
+  envLines: TArrayOfString;
+  i, p: Integer;
+  k, v, envPath: string;
+begin
+  // On an update (re-install into the same folder), pre-fill the wizard from
+  // the existing runtime config so the user doesn't re-type everything.
+  if CurPageID = CfgPage.ID then
+  begin
+    envPath := ExpandConstant('{app}\app\.env');
+    if FileExists(envPath) then
+    begin
+      if LoadStringsFromFile(envPath, envLines) then
+      begin
+        for i := 0 to GetArrayLength(envLines) - 1 do
+        begin
+          p := Pos('=', envLines[i]);
+          if p > 0 then
+          begin
+            k := Trim(Copy(envLines[i], 1, p - 1));
+            v := Trim(Copy(envLines[i], p + 1, Length(envLines[i])));
+            if k = 'SENTRY_BACKEND_URL' then CfgPage.Values[0] := v;
+            if k = 'SENTRY_BACKEND_SERVICE_TOKEN' then CfgPage.Values[1] := v;
+            if k = 'OLLAMA_BASE_URL' then CfgPage.Values[2] := v;
+          end;
+        end;
+      end;
+    end;
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;

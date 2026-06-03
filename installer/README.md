@@ -50,6 +50,17 @@ On Finish it runs first-time setup (visible console): ensures `uv`, runs
 Services also appear in `services.msc` as `ChipmoSentryAi-*` (boot-start,
 auto-restart on crash). Logs: `<install>\logs\<component>.out/err.log`.
 
+## Updates
+```powershell
+<install>\scripts\update.ps1        # or Start Menu "Check for updates"
+```
+It compares the installed `__version__` with the latest GitHub release, and if
+newer downloads + launches `ChipmoSentryAi-Setup.exe`. Re-installing over the
+top refreshes the bundled binaries + source and re-runs setup (`uv sync` picks
+up new deps, services reinstall). The wizard **pre-fills your existing backend
+URL / token / Ollama URL** from the current config, so just click through.
+A new release is cut by pushing a version tag (see "Get the installer").
+
 ## Railway backend env (so it can drive this center)
 | Env | Value |
 |---|---|
