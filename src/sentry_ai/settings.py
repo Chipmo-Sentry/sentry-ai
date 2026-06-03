@@ -33,7 +33,14 @@ class Settings(BaseSettings):
 
     # Backend integration (sentry-ai → sentry-backend)
     sentry_backend_url: str = "http://localhost:8000"
+    # Bearer token sent to the backend. After pairing this holds the node's
+    # ai_node JWT (the backend accepts it for live-metadata too).
     sentry_backend_service_token: str = "dev-service-token"
+
+    # Set by `python -m sentry_ai.pair` after a successful pairing. When present,
+    # the node runs a heartbeat loop reporting telemetry + polling config.
+    ai_node_id: str | None = None
+    heartbeat_interval_sec: int = 60
 
     # M1-LIVE L2: live worker auto-start
     # Comma-separated list of `camera_id=rtsp_url` pairs. Empty = no auto-start.

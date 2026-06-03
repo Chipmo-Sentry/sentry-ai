@@ -1,19 +1,20 @@
 <#
 .SYNOPSIS
-  Post-install setup for the Chipmo Sentry AI server. Run by the installer (or
-  manually, elevated). Ensures uv, syncs the sentry-ai venv (downloads torch),
-  writes the runtime .env, and installs the Windows services.
+  Post-install setup for the Chipmo Sentry AI server. Ensures uv, syncs the
+  sentry-ai venv (downloads torch), writes runtime config, PAIRS the node with
+  the backend using the 6-digit code, and installs the Windows services.
 
 .NOTES
-  This step needs internet (uv sync pulls torch/ultralytics, ~2-3 GB) and may
-  take 10-20 minutes the first time. A console window stays open so you can
-  watch progress.
+  First run needs internet (uv sync pulls torch/ultralytics, ~2-3 GB) and may
+  take 10-20 minutes. On an update, leave -PairingCode blank to keep the
+  existing pairing.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BackendUrl,
-    [Parameter(Mandatory = $true)][string]$Token,
     [string]$OllamaUrl = 'http://localhost:11434',
+    [string]$PairingCode = '',
+    [string]$PublicUrl = '',
     [string]$TunnelName = ''
 )
 
@@ -24,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $cfg.LogDir, $cfg.RunDir, $cfg.ConfigD
 
 function Write-Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
-# 1. Ensure uv is available -------------------------------------------------
+# 1. Ensure uv ---------------------------------------------------------------
 Write-Step "Checking for uv..."
 $uv = (Get-Command uv -ErrorAction SilentlyContinue)
 if (-not $uv) {
@@ -32,13 +33,13 @@ if (-not $uv) {
     powershell -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
     $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
     $uv = (Get-Command uv -ErrorAction SilentlyContinue)
-    if (-not $uv) { throw "uv install failed. Install uv manually (https://docs.astral.sh/uv) and re-run setup-server.ps1." }
+    if (-not $uv) { throw "uv install failed. Install uv manually and re-run setup-server.ps1." }
 }
 $uvExe = $uv.Source
 Write-Host "    uv: $uvExe"
 
-# 2. Sync the sentry-ai venv (this is the long step) ------------------------
-Write-Step "Syncing sentry-ai dependencies (this downloads torch, can take 10-20 min)..."
+# 2. Sync the sentry-ai venv -------------------------------------------------
+Write-Step "Syncing sentry-ai dependencies (downloads torch, can take 10-20 min)..."
 Push-Location $cfg.AppSrc
 try {
     & $uvExe sync --no-dev
@@ -46,31 +47,54 @@ try {
 }
 finally { Pop-Location }
 
-# 3. Write runtime .env (sentry-ai reads .env from its project dir) ---------
-Write-Step "Writing runtime config..."
+# 3. Write base runtime config (NOT the token/node id - pairing fills those) -
+Write-Step "Writing base config..."
 $envPath = Join-Path $cfg.AppSrc '.env'
-$envBody = @"
-ENVIRONMENT=production
-DEBUG=false
-LOG_LEVEL=INFO
-HOST=$($cfg.AiHost)
-PORT=$($cfg.AiPort)
+$baseKeys = @{
+    'ENVIRONMENT'          = 'production'
+    'DEBUG'                = 'false'
+    'LOG_LEVEL'            = 'INFO'
+    'HOST'                 = $cfg.AiHost
+    'PORT'                 = "$($cfg.AiPort)"
+    'OLLAMA_BASE_URL'      = $OllamaUrl
+    'DEFAULT_PROVIDER'     = 'minicpm-v-2.6'
+    'INFERENCE_TIMEOUT_SEC' = '30'
+    'SENTRY_BACKEND_URL'   = $BackendUrl
+}
+# Preserve existing lines (esp. SENTRY_BACKEND_SERVICE_TOKEN + AI_NODE_ID on update).
+$existing = @{}
+if (Test-Path $envPath) {
+    foreach ($line in (Get-Content $envPath)) {
+        if ($line -match '^\s*([^=#]+)=(.*)$') { $existing[$Matches[1].Trim()] = $Matches[2] }
+    }
+}
+foreach ($k in $baseKeys.Keys) { $existing[$k] = $baseKeys[$k] }
+$out = foreach ($k in $existing.Keys) { "$k=$($existing[$k])" }
+Set-Content -Path $envPath -Value $out -Encoding utf8
 
-OLLAMA_BASE_URL=$OllamaUrl
-DEFAULT_PROVIDER=minicpm-v-2.6
-INFERENCE_TIMEOUT_SEC=30
+# 4. Pair with the backend ---------------------------------------------------
+if ($PairingCode) {
+    Write-Step "Pairing with backend (code $PairingCode)..."
+    Push-Location $cfg.AppSrc
+    try {
+        $pairArgs = @('run', 'python', '-m', 'sentry_ai.pair', '--code', $PairingCode, '--backend', $BackendUrl, '--env-file', '.env')
+        if ($PublicUrl) { $pairArgs += @('--public-url', $PublicUrl) }
+        & $uvExe @pairArgs
+        if ($LASTEXITCODE -ne 0) { throw "pairing failed (exit $LASTEXITCODE). Check the code (it expires after 30 min)." }
+    }
+    finally { Pop-Location }
+}
+elseif (-not $existing.ContainsKey('AI_NODE_ID')) {
+    throw "No pairing code given and this node isn't paired yet. Generate a code in superadmin (AI servers page) and re-run with it."
+}
+else {
+    Write-Step "No code given - keeping existing pairing ($($existing['AI_NODE_ID']))."
+}
 
-SENTRY_BACKEND_URL=$BackendUrl
-SENTRY_BACKEND_SERVICE_TOKEN=$Token
-"@
-Set-Content -Path $envPath -Value $envBody -Encoding utf8
-Write-Host "    wrote $envPath"
+# Persist uv path for the service installer.
+Set-Content -Path (Join-Path $cfg.ConfigDir 'runtime.txt') -Value @("UV_EXE=$uvExe") -Encoding ascii
 
-# Persist the resolved uv path + tunnel name for the service installer.
-Set-Content -Path (Join-Path $cfg.ConfigDir 'runtime.txt') `
-    -Value @("UV_EXE=$uvExe", "TUNNEL_NAME=$TunnelName") -Encoding ascii
-
-# 4. Install the Windows services ------------------------------------------
+# 5. Install services --------------------------------------------------------
 Write-Step "Installing Windows services..."
 $installArgs = @('-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'install-services.ps1'))
 if ($TunnelName) { $installArgs += @('-TunnelName', $TunnelName) }
@@ -78,12 +102,9 @@ if ($TunnelName) { $installArgs += @('-TunnelName', $TunnelName) }
 
 Write-Step "Done."
 Write-Host ""
-Write-Host "Chipmo Sentry AI server installed." -ForegroundColor Green
-Write-Host "  Manage:  $($cfg.AppRoot)\scripts\server-control.ps1 status|health|logs|start|stop|restart" -ForegroundColor Green
-Write-Host "  Make sure Ollama is running:  ollama serve   (model: ollama pull minicpm-v:8b)" -ForegroundColor Yellow
-if (-not $TunnelName) {
-    Write-Host "  Tunnel NOT configured. To expose to the Railway backend, set up a" -ForegroundColor Yellow
-    Write-Host "  cloudflared tunnel (config\cloudflared.yml) then re-run install-services -TunnelName <name>." -ForegroundColor Yellow
-}
+Write-Host "Chipmo Sentry AI server installed + paired." -ForegroundColor Green
+Write-Host "  It should now appear under 'AI servers' in the superadmin dashboard." -ForegroundColor Green
+Write-Host "  Manage:  $($cfg.AppRoot)\scripts\server-control.ps1 status|health|logs" -ForegroundColor Green
+Write-Host "  Ensure Ollama is running:  ollama serve   (ollama pull minicpm-v:8b)" -ForegroundColor Yellow
 Write-Host ""
 Read-Host "Press Enter to close"

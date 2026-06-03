@@ -29,15 +29,20 @@ cloudflared + NSSM, compiles the Inno Setup script, and publishes
 > `dist\ChipmoSentryAi-Setup.exe`.
 
 ## Install (on the AI machine)
-Run the .exe **as administrator** (services need it). The wizard asks for:
+First, in **superadmin → AI сервер → Холболтын код** generate a **6-digit
+pairing code**. Then run the .exe **as administrator** (services need it). The
+wizard asks for:
 - **Railway backend URL** — e.g. `https://sentry-backend-xxxx.up.railway.app`
-- **Service token** — must equal the backend's `LIVE_METADATA_SHARED_SECRET`
+- **Pairing code** — the 6 digits from superadmin (blank on an update keeps the
+  existing pairing)
 - **Ollama URL** — default `http://localhost:11434`
 - **cloudflared tunnel name** — optional; leave blank to skip the tunnel service
 
 On Finish it runs first-time setup (visible console): ensures `uv`, runs
 `uv sync` (downloads torch/ultralytics — **10–20 min, needs internet**), writes
-`app\.env`, and installs the services.
+`app\.env`, **pairs with the backend** (the returned `ai_node` JWT becomes the
+node's credential), and installs the services. The node then appears under
+**AI сервер** in superadmin (online status, telemetry, config, revoke).
 
 ## Manage
 ```powershell
@@ -67,7 +72,9 @@ A new release is cut by pushing a version tag (see "Get the installer").
 | `SENTRY_AI_URL` | `https://ai.sentry.chipmo.mn` (your tunnel hostname) |
 | `MEDIAMTX_API_URL` | `https://mtxapi.sentry.chipmo.mn` |
 | `MEDIAMTX_RTSP_URL` | `rtsp://127.0.0.1:8554` |
-| `LIVE_METADATA_SHARED_SECRET` | **must equal** the service token above |
+
+Pairing means `LIVE_METADATA_SHARED_SECRET` is **no longer required** for paired
+nodes — the backend accepts the node's `ai_node` JWT on the live-metadata path.
 
 Frontend: `NEXT_PUBLIC_MEDIAMTX_HLS_BASE` / `_WHEP_BASE` → your `media.*` /
 `whep.*` tunnel hostnames.

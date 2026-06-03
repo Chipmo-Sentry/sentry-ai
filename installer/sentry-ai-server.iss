@@ -88,9 +88,9 @@ begin
   CfgPage := CreateInputQueryPage(wpSelectDir,
     'Server configuration',
     'How this AI server connects to the Railway backend',
-    'These values are written to the runtime config. The service token MUST match the backend''s LIVE_METADATA_SHARED_SECRET.');
+    'Generate a pairing code in superadmin (AI сервер -> Холболтын код). On an update you can leave the code blank to keep the existing pairing.');
   CfgPage.Add('Railway backend URL (e.g. https://sentry-backend-xxxx.up.railway.app):', False);
-  CfgPage.Add('Service token (= backend LIVE_METADATA_SHARED_SECRET):', True);
+  CfgPage.Add('Pairing code (6 digits from superadmin):', False);
   CfgPage.Add('Ollama URL:', False);
   CfgPage.Add('cloudflared tunnel name (optional - leave blank to skip):', False);
   CfgPage.Values[2] := 'http://localhost:11434';
@@ -119,8 +119,8 @@ begin
           begin
             k := Trim(Copy(envLines[i], 1, p - 1));
             v := Trim(Copy(envLines[i], p + 1, Length(envLines[i])));
+            // Never pre-fill the pairing code (Values[1]) - it's one-time.
             if k = 'SENTRY_BACKEND_URL' then CfgPage.Values[0] := v;
-            if k = 'SENTRY_BACKEND_SERVICE_TOKEN' then CfgPage.Values[1] := v;
             if k = 'OLLAMA_BASE_URL' then CfgPage.Values[2] := v;
           end;
         end;
@@ -138,22 +138,21 @@ begin
     begin
       MsgBox('Please enter the Railway backend URL.', mbError, MB_OK);
       Result := False;
-    end
-    else if Trim(CfgPage.Values[1]) = '' then
-    begin
-      MsgBox('Please enter the service token.', mbError, MB_OK);
-      Result := False;
     end;
+    // Pairing code may be blank on an update (keeps the existing pairing);
+    // setup-server.ps1 fails clearly if a fresh node has no code.
   end;
 end;
 
 function GetSetupArgs(Param: string): string;
 var
-  tunnel: string;
+  code, tunnel: string;
 begin
   Result := '-BackendUrl "' + Trim(CfgPage.Values[0]) + '"' +
-            ' -Token "' + Trim(CfgPage.Values[1]) + '"' +
             ' -OllamaUrl "' + Trim(CfgPage.Values[2]) + '"';
+  code := Trim(CfgPage.Values[1]);
+  if code <> '' then
+    Result := Result + ' -PairingCode "' + code + '"';
   tunnel := Trim(CfgPage.Values[3]);
   if tunnel <> '' then
     Result := Result + ' -TunnelName "' + tunnel + '"';

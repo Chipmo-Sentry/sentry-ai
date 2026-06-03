@@ -1,5 +1,6 @@
 """FastAPI application entrypoint for sentry-ai."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -53,9 +54,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             log.info("live.auto_start", camera_id=cam_id, rtsp_url=rtsp_url)
             manager.start_camera(cam_id, rtsp_url, frame_skip=settings.live_frame_skip)
 
+    # AI-node heartbeat (only runs when paired).
+    from sentry_ai.heartbeat import heartbeat_loop
+
+    hb_task = asyncio.create_task(heartbeat_loop())
+
     yield
 
     log.info("stopping")
+    hb_task.cancel()
     get_manager().stop_all()
     await close_client()
 
