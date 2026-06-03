@@ -91,8 +91,11 @@ class BehaviorConfigPoller:
             r.raise_for_status()
             data: dict[str, Any] = r.json()
 
+        # Disabled criteria (active=false) contribute 0 — the scorer needs no
+        # change since it just reads weights[key]. Custom criteria without a
+        # coded detector are simply never looked up by the scorer.
         weights = {
-            d["key"]: float(d["weight"])
+            d["key"]: (float(d["weight"]) if d.get("active", True) else 0.0)
             for d in data.get("dimensions", [])
             if "key" in d and "weight" in d
         }
