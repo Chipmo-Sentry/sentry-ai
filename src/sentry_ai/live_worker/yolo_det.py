@@ -44,7 +44,7 @@ _DEVICE: str | None = None
 class Item:
     label: str
     box: tuple[float, float, float, float]  # (x1, y1, x2, y2) pixels
-    score: float                              # 0.0-1.0
+    score: float  # 0.0-1.0
 
 
 def _load_model(weights: str = "yolo11n.pt") -> tuple[object, str]:
@@ -64,7 +64,9 @@ def _load_model(weights: str = "yolo11n.pt") -> tuple[object, str]:
         model = YOLO(weights)
         dummy = np.zeros((640, 640, 3), dtype=np.uint8)
         model.predict(
-            dummy, device=device, verbose=False,
+            dummy,
+            device=device,
+            verbose=False,
             classes=list(COCO_ITEM_CLASSES.keys()),
         )
         log.info("yolo_det.loaded", device=device)

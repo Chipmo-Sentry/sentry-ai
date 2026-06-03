@@ -51,7 +51,7 @@ class CameraWorker:
         # Stats
         self._frames_total = 0
         self._detections_total = 0
-        self._capture_times: deque[float] = deque(maxlen=200)   # for fps_capture
+        self._capture_times: deque[float] = deque(maxlen=200)  # for fps_capture
         self._inference_times: deque[float] = deque(maxlen=200)  # for fps_inference
         self._last_error: str | None = None
 
@@ -256,7 +256,10 @@ class CameraWorker:
         for t in tracked:
             person_h = max(1.0, t.box[3] - t.box[1])
             risk_pct, color, _reasons = self._scorer.score(
-                t.tracker_id, t.keypoints, person_h, items=self._cached_items,
+                t.tracker_id,
+                t.keypoints,
+                person_h,
+                items=self._cached_items,
             )
             tracks_payload.append(
                 TrackPayload(

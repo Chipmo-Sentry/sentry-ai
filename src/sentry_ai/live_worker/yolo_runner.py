@@ -31,7 +31,7 @@ PERSON_CLASS = 0
 @dataclass(slots=True)
 class Detection:
     box: tuple[float, float, float, float]  # (x1, y1, x2, y2) pixels
-    score: float                              # 0.0-1.0
+    score: float  # 0.0-1.0
     # COCO-17 pose keypoints. Shape (17, 2) = [x, y] per joint.
     # Order: nose, l_eye, r_eye, l_ear, r_ear, l_shoulder, r_shoulder, l_elbow,
     # r_elbow, l_wrist, r_wrist, l_hip, r_hip, l_knee, r_knee, l_ankle, r_ankle.
@@ -105,8 +105,8 @@ class YoloPoseRunner:
             return []
 
         # Tensors → CPU numpy
-        xyxy = boxes.xyxy.cpu().numpy()       # (N, 4)
-        conf = boxes.conf.cpu().numpy()       # (N,)
+        xyxy = boxes.xyxy.cpu().numpy()  # (N, 4)
+        conf = boxes.conf.cpu().numpy()  # (N,)
 
         # Pose keypoints (only present on pose models). r.keypoints.xy: (N, 17, 2)
         kpts_xy: NDArray[np.float32] | None = None

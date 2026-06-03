@@ -160,15 +160,17 @@ class BehaviorScorer:
             if reasons:
                 state.last_reasons = reasons
 
-            return state.score, classify_color(state.score, self.green_max, self.yellow_max), state.last_reasons
+            return (
+                state.score,
+                classify_color(state.score, self.green_max, self.yellow_max),
+                state.last_reasons,
+            )
 
     def cleanup_stale(self) -> int:
         """Drop tracker states unseen for STALE_TRACK_SEC. Returns count removed."""
         now = time.time()
         with self._lock:
-            stale = [
-                tid for tid, s in self._states.items() if now - s.last_seen > STALE_TRACK_SEC
-            ]
+            stale = [tid for tid, s in self._states.items() if now - s.last_seen > STALE_TRACK_SEC]
             for tid in stale:
                 del self._states[tid]
             return len(stale)

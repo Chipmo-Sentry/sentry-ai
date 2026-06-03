@@ -42,7 +42,9 @@ class BehaviorConfigPoller:
             return
         self._stop.clear()
         self._thread = threading.Thread(
-            target=self._run, name="behavior-config-poller", daemon=True,
+            target=self._run,
+            name="behavior-config-poller",
+            daemon=True,
         )
         self._thread.start()
         log.info("config_poller.started", interval=POLL_INTERVAL_SEC)
