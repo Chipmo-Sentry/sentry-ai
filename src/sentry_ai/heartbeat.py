@@ -24,17 +24,40 @@ log = get_logger("sentry_ai.heartbeat")
 current_config: dict[str, object] | None = None
 
 
-def _telemetry() -> dict[str, object]:
+# MediaMTX (ingest) control API — same probe server-control.ps1 uses for health.
+_INGEST_PROBE_URL = "http://127.0.0.1:9997/v3/config/global/get"
+
+
+async def _probe(client: httpx.AsyncClient, url: str) -> bool:
+    """True if `url` answers below 500 within a short timeout. Never raises."""
+    try:
+        resp = await client.get(url, timeout=3.0)
+        return resp.status_code < 500
+    except Exception:  # noqa: BLE001 — any failure = down
+        return False
+
+
+async def _telemetry(client: httpx.AsyncClient) -> dict[str, object]:
+    settings = get_settings()
     mgr = get_manager()
     statuses = mgr.status()
     running = [s for s in statuses if s.running]
     fps = sum(s.fps_inference for s in running)
     from sentry_ai import __version__
 
+    # Per-dependency health, probed locally so superadmin can show it without
+    # anyone RDP-ing into this box. `ai` is implicitly up (we're sending this).
+    health = {
+        "ai": True,
+        "ollama": await _probe(client, settings.ollama_base_url.rstrip("/") + "/api/tags"),
+        "ingest": await _probe(client, _INGEST_PROBE_URL),
+    }
+
     return {
         "fps_inference": round(fps, 1),
         "active_cameras": len(running),
         "version": __version__,
+        "health": health,
     }
 
 
@@ -43,7 +66,7 @@ async def _beat(client: httpx.AsyncClient) -> None:
     settings = get_settings()
     url = settings.sentry_backend_url.rstrip("/") + "/api/v1/ai-nodes/heartbeat"
     headers = {"Authorization": f"Bearer {settings.sentry_backend_service_token}"}
-    resp = await client.post(url, json=_telemetry(), headers=headers, timeout=15.0)
+    resp = await client.post(url, json=await _telemetry(client), headers=headers, timeout=15.0)
     if resp.status_code == 200:
         current_config = resp.json()
     elif resp.status_code == 401:
