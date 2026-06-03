@@ -1,6 +1,6 @@
 [project]
 name = "sentry-ai"
-version = "0.1.0"
+version = "0.3.0"
 description = "Chipmo Sentry AI inference — YOLO Stage 1 + VLM Stage 2 (via Ollama)"
 readme = "README.md"
 requires-python = "==3.11.*"

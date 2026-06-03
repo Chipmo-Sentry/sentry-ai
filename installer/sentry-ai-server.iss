@@ -59,6 +59,12 @@ Source: "bin\nssm.exe";        DestDir: "{app}\bin"; Flags: ignoreversion
 [Icons]
 Name: "{group}\Chipmo Sentry AI - Status"; Filename: "powershell.exe"; \
   Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\server-control.ps1"" status"
+Name: "{group}\Pairing - status"; Filename: "powershell.exe"; \
+  Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\pairing.ps1"" status"
+Name: "{group}\Pairing - re-pair (new code)"; Filename: "powershell.exe"; \
+  Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\pairing.ps1"" pair"
+Name: "{group}\Pairing - unpair"; Filename: "powershell.exe"; \
+  Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\pairing.ps1"" unpair"
 Name: "{group}\Re-run setup"; Filename: "powershell.exe"; \
   Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\setup-server.ps1"""
 Name: "{group}\Check for updates"; Filename: "powershell.exe"; \
@@ -101,12 +107,13 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   envLines: TArrayOfString;
   i, p: Integer;
-  k, v, envPath: string;
+  k, v, envPath, nodeId: string;
 begin
   // On an update (re-install into the same folder), pre-fill the wizard from
   // the existing runtime config so the user doesn't re-type everything.
   if CurPageID = CfgPage.ID then
   begin
+    nodeId := '';
     envPath := ExpandConstant('{app}\app\.env');
     if FileExists(envPath) then
     begin
@@ -122,10 +129,17 @@ begin
             // Never pre-fill the pairing code (Values[1]) - it's one-time.
             if k = 'SENTRY_BACKEND_URL' then CfgPage.Values[0] := v;
             if k = 'OLLAMA_BASE_URL' then CfgPage.Values[2] := v;
+            if k = 'AI_NODE_ID' then nodeId := v;
           end;
         end;
       end;
     end;
+    // Already paired? Make it crystal-clear the code is NOT needed again.
+    if nodeId <> '' then
+      WizardForm.PageDescriptionLabel.Caption :=
+        'This machine is ALREADY PAIRED (node ' + nodeId + ').' + #13#10 +
+        'Leave the pairing code BLANK and click Next to keep it. ' +
+        'To re-pair later use Start Menu -> Pairing - re-pair.';
   end;
 end;
 
