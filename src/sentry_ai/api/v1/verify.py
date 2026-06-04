@@ -5,13 +5,33 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from sentry_ai.auth import require_service_token
 from sentry_ai.dependencies import OllamaClientDep
 from sentry_ai.pipeline.verifier import verify_clip
 from sentry_ai.providers.factory import get_provider
 from sentry_ai.schemas.verify import VerifyRequest, VerifyResponse
 from sentry_ai.settings import get_settings
 
-router = APIRouter(prefix="/v1", tags=["verify"])
+router = APIRouter(prefix="/v1", tags=["verify"], dependencies=[Depends(require_service_token)])
+
+
+def _resolve_clip_path(raw: str) -> Path:
+    """Resolve a request clip_path, confining it to CLIP_STORAGE_ROOT when set.
+
+    Blocks the arbitrary-host-file read: '../' traversal and absolute paths
+    outside the configured storage root are rejected with 400.
+    """
+    settings = get_settings()
+    candidate = Path(raw).resolve()
+    root = settings.clip_storage_root
+    if root:
+        root_resolved = Path(root).resolve()
+        if not candidate.is_relative_to(root_resolved):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="clip_path is outside the allowed storage root",
+            )
+    return candidate
 
 
 @router.post("/verify", response_model=VerifyResponse)
@@ -27,7 +47,7 @@ async def verify(
     except KeyError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
-    clip_path = Path(body.clip_path)
+    clip_path = _resolve_clip_path(body.clip_path)
     # Offload blocking stat to a thread to keep the event loop free.
     import asyncio
 
@@ -38,7 +58,19 @@ async def verify(
             detail=f"Clip not found at {body.clip_path}",
         )
 
-    output, latency_ms, frames_used = await verify_clip(clip_path=clip_path, provider=provider)
+    # RAG (docs/19 Phase 4): if the caller described the event, fetch similar
+    # past staff-verified cases for this store and feed them to the VLM.
+    store_context = None
+    if body.rag_query:
+        from sentry_ai import rag
+
+        store_context = await rag.retrieve_context(
+            str(body.store_id) if body.store_id else None, body.rag_query
+        )
+
+    output, latency_ms, frames_used = await verify_clip(
+        clip_path=clip_path, provider=provider, store_context=store_context
+    )
 
     return VerifyResponse(
         category=output.category,

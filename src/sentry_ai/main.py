@@ -16,6 +16,7 @@ from sentry_ai.api.v1 import verify as verify_v1
 from sentry_ai.dependencies import close_client
 from sentry_ai.live_worker import get_manager
 from sentry_ai.logging_setup import configure_logging, get_logger
+from sentry_ai.runtime import is_railway_host
 from sentry_ai.settings import get_settings
 
 
@@ -47,12 +48,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         default_provider=settings.default_provider,
     )
 
-    # M1-LIVE L2: auto-start live workers from settings
+    # M1-LIVE L2: auto-start live workers from settings.
+    # Red-line #2 / ADR-0007: RTSP ingest must NEVER run on Railway — refuse to
+    # auto-start workers there even if LIVE_AUTO_START is set by mistake.
     if settings.live_auto_start:
-        manager = get_manager()
-        for cam_id, rtsp_url in _parse_auto_start(settings.live_auto_start):
-            log.info("live.auto_start", camera_id=cam_id, rtsp_url=rtsp_url)
-            manager.start_camera(cam_id, rtsp_url, frame_skip=settings.live_frame_skip)
+        if is_railway_host():
+            log.error("live.auto_start_refused_on_railway", spec=settings.live_auto_start)
+        else:
+            manager = get_manager()
+            for cam_id, rtsp_url in _parse_auto_start(settings.live_auto_start):
+                log.info("live.auto_start", camera_id=cam_id, rtsp_url=rtsp_url)
+                manager.start_camera(cam_id, rtsp_url, frame_skip=settings.live_frame_skip)
 
     # AI-node heartbeat (only runs when paired).
     from sentry_ai.heartbeat import heartbeat_loop

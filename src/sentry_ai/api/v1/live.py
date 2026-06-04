@@ -2,19 +2,43 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response
+from urllib.parse import urlparse
 
+from fastapi import APIRouter, Depends, HTTPException, Response
+
+from sentry_ai.auth import require_service_token
 from sentry_ai.live_worker import get_manager
 from sentry_ai.live_worker.schemas import (
     LiveStartRequest,
     LiveStatusResponse,
 )
+from sentry_ai.runtime import is_railway_host
+from sentry_ai.settings import get_settings
 
-router = APIRouter(prefix="/v1/live", tags=["live"])
+router = APIRouter(prefix="/v1/live", tags=["live"], dependencies=[Depends(require_service_token)])
+
+
+def _validate_rtsp_url(url: str) -> None:
+    """Reject non-allowlisted URL schemes — blocks SSRF / local-file vectors
+    (file://, http://, etc.) before the worker opens the URL with OpenCV."""
+    allowed = {s.strip().lower() for s in get_settings().allowed_rtsp_schemes.split(",") if s.strip()}
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"rtsp_url scheme '{scheme}' not allowed (allowed: {sorted(allowed)})",
+        )
 
 
 @router.post("/start", status_code=202)
 def start(req: LiveStartRequest) -> dict[str, str]:
+    # Red-line #2 / ADR-0007: RTSP ingest must NEVER run on Railway.
+    if is_railway_host():
+        raise HTTPException(
+            status_code=403,
+            detail="Live RTSP workers must not run on Railway — deploy sentry-ai on the GPU/VPS host",
+        )
+    _validate_rtsp_url(req.rtsp_url)
     get_manager().start_camera(req.camera_id, req.rtsp_url)
     return {"camera_id": req.camera_id, "status": "starting"}
 

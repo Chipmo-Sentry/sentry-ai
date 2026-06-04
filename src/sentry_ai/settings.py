@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Ollama (host runs the runtime; we just HTTP into it)
     ollama_base_url: str = "http://localhost:11434"
     default_provider: str = "minicpm-v-2.6"
+    # RAG feedback loop (docs/19 Phase 4): Ollama embedding model for similarity.
+    # Empty disables RAG. `ollama pull nomic-embed-text` on the node first.
+    embed_model: str = "nomic-embed-text"
     inference_timeout_sec: int = 30
     retry_on_parse_error: int = 2
 
@@ -48,6 +51,18 @@ class Settings(BaseSettings):
     #   live_auto_start="cam1_hik=rtsp://localhost:8554/cam1_hik,cam2_unv=rtsp://localhost:8554/cam2_unv"
     live_auto_start: str = ""
     live_frame_skip: int = 3  # analyze every Nth frame (10 FPS on 30 FPS source)
+
+    # --- Service auth + input hardening (enforce-if-configured) ---
+    # Shared secret required as `Authorization: Bearer <token>` on /v1/* routes.
+    # None/empty → routes are OPEN (trusted-LAN M1 default). Set the SAME value
+    # as sentry-backend's SENTRY_AI_SERVICE_TOKEN before exposing this service.
+    ai_service_token: str | None = None
+    # When set, /v1/verify clip_path must resolve INSIDE this directory — blocks
+    # the arbitrary-host-file read. None → no constraint (LAN default).
+    clip_storage_root: str | None = None
+    # Schemes /v1/live/start may open with cv2.VideoCapture — blocks file://,
+    # http(s):// and other SSRF/local-file vectors. rtsp(s) only by default.
+    allowed_rtsp_schemes: str = "rtsp,rtsps"
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
