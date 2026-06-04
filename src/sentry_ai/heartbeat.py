@@ -53,11 +53,18 @@ async def _telemetry(client: httpx.AsyncClient) -> dict[str, object]:
         "ingest": await _probe(client, _INGEST_PROBE_URL),
     }
 
+    # Resource load (CPU/RAM/GPU) for the superadmin observability dashboard
+    # (docs/19). Best-effort; GPU fields are None on a CPU-only box.
+    from sentry_ai import system_metrics
+
+    resources = system_metrics.sample().as_dict()
+
     return {
         "fps_inference": round(fps, 1),
         "active_cameras": len(running),
         "version": __version__,
         "health": health,
+        **resources,
     }
 
 
