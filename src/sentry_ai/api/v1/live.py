@@ -21,7 +21,9 @@ router = APIRouter(prefix="/v1/live", tags=["live"], dependencies=[Depends(requi
 def _validate_rtsp_url(url: str) -> None:
     """Reject non-allowlisted URL schemes — blocks SSRF / local-file vectors
     (file://, http://, etc.) before the worker opens the URL with OpenCV."""
-    allowed = {s.strip().lower() for s in get_settings().allowed_rtsp_schemes.split(",") if s.strip()}
+    allowed = {
+        s.strip().lower() for s in get_settings().allowed_rtsp_schemes.split(",") if s.strip()
+    }
     scheme = urlparse(url).scheme.lower()
     if scheme not in allowed:
         raise HTTPException(

@@ -84,9 +84,7 @@ def sample() -> ResourceSample:
             s.vram_used_mb = int(mem.used / 1024 / 1024)
             s.vram_total_mb = int(mem.total / 1024 / 1024)
             with contextlib.suppress(Exception):  # temp is optional
-                s.gpu_temp_c = int(
-                    pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
-                )
+                s.gpu_temp_c = int(pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU))
         except Exception as e:  # noqa: BLE001
             log.debug("nvml.sample_failed", error=str(e))
 

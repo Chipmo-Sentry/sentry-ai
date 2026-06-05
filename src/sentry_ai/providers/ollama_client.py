@@ -58,9 +58,7 @@ class OllamaClient:
         verified cases. Raises on transport/parse errors so the caller can fall
         back gracefully (RAG is best-effort).
         """
-        resp = await self._client.post(
-            "/api/embeddings", json={"model": model, "prompt": text}
-        )
+        resp = await self._client.post("/api/embeddings", json={"model": model, "prompt": text})
         resp.raise_for_status()
         data = resp.json()
         vec = data.get("embedding")

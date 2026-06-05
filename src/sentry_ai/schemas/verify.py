@@ -29,3 +29,6 @@ class VerifyResponse(BaseModel):
     model_name: str
     inference_latency_ms: int = Field(ge=0)
     frames_used: int
+    # Embedding of `reasoning` (docs/19 Phase 4 RAG). The backend stores it on
+    # the alert so staff feedback can spawn a verified_case. None if RAG is off.
+    embedding: list[float] | None = None

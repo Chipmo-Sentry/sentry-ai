@@ -72,6 +72,12 @@ async def verify(
         clip_path=clip_path, provider=provider, store_context=store_context
     )
 
+    # RAG (docs/19 Phase 4): embed the reasoning so the backend can store it on
+    # the alert → staff feedback later spawns a retrievable verified_case.
+    from sentry_ai import rag
+
+    embedding = await rag.embed_text(output.reasoning)
+
     return VerifyResponse(
         category=output.category,
         confidence=output.confidence,
@@ -79,4 +85,5 @@ async def verify(
         model_name=provider.name,
         inference_latency_ms=latency_ms,
         frames_used=frames_used,
+        embedding=embedding,
     )

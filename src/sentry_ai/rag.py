@@ -26,7 +26,7 @@ from sentry_ai.settings import get_settings
 log = get_logger("sentry_ai.rag")
 
 
-async def _embed(text: str) -> list[float] | None:
+async def embed_text(text: str) -> list[float] | None:
     settings = get_settings()
     if not settings.embed_model:
         return None
@@ -44,11 +44,9 @@ def _backend_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {get_settings().sentry_backend_service_token}"}
 
 
-async def retrieve_context(
-    store_id: str | None, query: str, *, k: int = 3
-) -> str | None:
+async def retrieve_context(store_id: str | None, query: str, *, k: int = 3) -> str | None:
     """Few-shot text from the top-k similar past verified cases, or None."""
-    embedding = await _embed(query)
+    embedding = await embed_text(query)
     if embedding is None:
         return None
     settings = get_settings()
@@ -78,9 +76,7 @@ def _format(matches: list[dict[str, object]]) -> str | None:
         "false_positive": "ХУДАЛ сэрэлт (хулгай биш)",
         "unclear": "тодорхойгүй",
     }
-    lines = [
-        "Энэ дэлгүүрийн өмнөх ижил төстэй тохиолдлуудыг ажилтан дараах байдлаар үнэлсэн:"
-    ]
+    lines = ["Энэ дэлгүүрийн өмнөх ижил төстэй тохиолдлуудыг ажилтан дараах байдлаар үнэлсэн:"]
     for m in matches:
         v = verdict_label.get(str(m.get("verdict")), str(m.get("verdict")))
         desc = str(m.get("description", "")).strip()
@@ -97,7 +93,7 @@ async def store_case(
     description: str,
 ) -> bool:
     """Persist a staff-verified case for future RAG retrieval. Best-effort."""
-    embedding = await _embed(description)
+    embedding = await embed_text(description)
     if embedding is None:
         return False
     settings = get_settings()
