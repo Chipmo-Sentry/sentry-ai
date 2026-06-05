@@ -40,7 +40,14 @@ async def test_retrieve_context_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
     similar = respx.post("http://backend.test/api/v1/internal/rag/similar").mock(
         return_value=httpx.Response(
             200,
-            json=[{"description": "халаасанд нуув", "verdict": "true_positive", "category": "pocket_conceal", "score": 0.9}],
+            json=[
+                {
+                    "description": "халаасанд нуув",
+                    "verdict": "true_positive",
+                    "category": "pocket_conceal",
+                    "score": 0.9,
+                }
+            ],
         )
     )
 

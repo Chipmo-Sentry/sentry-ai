@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # When set, /v1/verify clip_path must resolve INSIDE this directory — blocks
     # the arbitrary-host-file read. None → no constraint (LAN default).
     clip_storage_root: str | None = None
+    # MediaMTX recordings dir on THIS node — /v1/cut-verify cuts the breach clip
+    # from here (docs/19 I5). Relative to the sentry-ingest box's recordings/.
+    mediamtx_recordings_dir: str | None = None
     # Schemes /v1/live/start may open with cv2.VideoCapture — blocks file://,
     # http(s):// and other SSRF/local-file vectors. rtsp(s) only by default.
     allowed_rtsp_schemes: str = "rtsp,rtsps"
