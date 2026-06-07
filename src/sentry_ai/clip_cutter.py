@@ -101,6 +101,19 @@ async def _run_ffmpeg(args: list[str], timeout: float = 60.0) -> None:  # noqa: 
         )
 
 
+def _confined_cam_dir(recordings_dir: str, mediamtx_path: str) -> Path:
+    """Resolve <recordings_dir>/<mediamtx_path>, confined to the root.
+
+    Sync helper (kept out of the async caller) — defense-in-depth on top of the
+    schema slug validation: rejects any '..'/symlink that escapes the root.
+    """
+    root = Path(recordings_dir).resolve()
+    cam_dir = (root / mediamtx_path).resolve()
+    if not cam_dir.is_relative_to(root):
+        raise ClipCutError(f"mediamtx_path escapes recordings root: {mediamtx_path!r}")
+    return cam_dir
+
+
 async def cut_window(
     mediamtx_path: str, start_offset_sec: int = -5, duration_sec: int = 15
 ) -> CutResult:
@@ -108,7 +121,7 @@ async def cut_window(
     settings = get_settings()
     if not settings.mediamtx_recordings_dir:
         raise ClipCutError("MEDIAMTX_RECORDINGS_DIR not configured on this node")
-    cam_dir = Path(settings.mediamtx_recordings_dir) / mediamtx_path
+    cam_dir = _confined_cam_dir(settings.mediamtx_recordings_dir, mediamtx_path)
     if not cam_dir.is_dir():
         raise ClipCutError(f"camera dir not found: {cam_dir}")
 

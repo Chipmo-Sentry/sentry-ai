@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 
 from sentry_ai.live_worker.behavior import BehaviorScorer
 from sentry_ai.live_worker.emitter import MetadataEmitter
+from sentry_ai.live_worker.reid import Embedder, StorePersonRegistry
 from sentry_ai.live_worker.schemas import FrameMetadata, TrackPayload
 from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
 from sentry_ai.live_worker.yolo_det import Item, YoloItemRunner
@@ -39,12 +40,22 @@ class CameraWorker:
         emitter: MetadataEmitter,
         frame_skip: int = 3,
         yolo_conf: float = 0.35,
+        store_id: str | None = None,
+        registry: StorePersonRegistry | None = None,
+        embedder: Embedder | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.frame_skip = max(1, frame_skip)
         self.yolo_conf = yolo_conf
         self._emitter = emitter
+        # Cross-camera re-ID (ADR-0022/0023): when a store registry + embedder are
+        # provided, each person is linked to a store-global id and their risk
+        # accumulates across the store's cameras. None → per-camera only.
+        self.store_id = store_id
+        self._registry = registry
+        self._embedder = embedder
+        self._prev_raw: dict[int, float] = {}  # per-track last raw score (for deltas)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -255,12 +266,29 @@ class CameraWorker:
         tracks_payload: list[TrackPayload] = []
         for t in tracked:
             person_h = max(1.0, t.box[3] - t.box[1])
-            risk_pct, color, _reasons = self._scorer.score(
+            raw_score, color, _reasons = self._scorer.score(
                 t.tracker_id,
                 t.keypoints,
                 person_h,
                 items=self._cached_items,
             )
+            # Emit a normalized 0-100 risk_pct (ADR-0022), not the raw score.
+            risk_pct = self._scorer.risk_pct(raw_score)
+
+            # Cross-camera re-ID + score accumulation (ADR-0022/0023). Link this
+            # person to a store-global id and add this frame's positive increment
+            # to their store-wide total, so suspicion built across cameras carries.
+            store_person_id: int | None = None
+            store_risk_pct: float | None = None
+            if self._registry is not None and self._embedder is not None:
+                emb = self._embedder.embed(frame_bgr, t.box)
+                if emb is not None:
+                    store_person_id = self._registry.match_or_create(emb, self.camera_id)
+                    delta = max(0.0, raw_score - self._prev_raw.get(t.tracker_id, 0.0))
+                    store_total = self._registry.add_score(store_person_id, delta)
+                    store_risk_pct = self._scorer.risk_pct(store_total)
+            self._prev_raw[t.tracker_id] = raw_score
+
             tracks_payload.append(
                 TrackPayload(
                     person_id=t.tracker_id,
@@ -268,6 +296,8 @@ class CameraWorker:
                     det_confidence=t.score,
                     risk_pct=risk_pct,
                     color=color,
+                    store_person_id=store_person_id,
+                    store_risk_pct=store_risk_pct,
                 ),
             )
 
@@ -309,8 +339,8 @@ class CameraWorker:
             else:
                 bgr = (0, 255, 0)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), bgr, 3)
-            # Raw accumulated score (no % — thresholds are absolute, см. behaviors UI)
-            label = f"#{t.tracker_id}  Risk: {p.risk_pct:.1f}"
+            # Normalized 0-100 risk (ADR-0022)
+            label = f"#{t.tracker_id}  Risk: {p.risk_pct:.0f}%"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), bgr, -1)
             cv2.putText(

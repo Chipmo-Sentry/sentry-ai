@@ -38,7 +38,9 @@ class CutVerifyRequest(BaseModel):
     """Live-breach verify (docs/19 I5): the backend asks this node to cut a clip
     from its own MediaMTX recordings and verify it. Sent on a threshold breach."""
 
-    mediamtx_path: str = Field(min_length=1, max_length=128)
+    # Safe slug only — flows into a filesystem path under the recordings dir,
+    # so reject '/', '..', whitespace etc. (matches backend MEDIAMTX_PATH_PATTERN).
+    mediamtx_path: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     store_id: UUID | None = None
     camera_id: UUID | None = None
     person_id: int | None = None

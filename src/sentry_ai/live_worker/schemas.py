@@ -16,15 +16,18 @@ class TrackPayload(BaseModel):
     L4 (behavior scoring) fills risk_pct + color.
     """
 
-    person_id: int = Field(description="Stable ID across frames from ByteTrack")
+    person_id: int = Field(description="Per-camera ByteTrack id (resets per camera)")
     box: tuple[float, float, float, float] = Field(
         description="(x1, y1, x2, y2) in source frame pixels",
     )
     det_confidence: float = Field(ge=0.0, le=1.0, description="YOLO detection score")
-    # Accumulated risk score (NOT percent — thresholds are absolute, configured
-    # via /api/v1/behaviors). Kept name 'risk_pct' for backward compat in JSON.
+    # Normalized 0-100 risk for THIS camera's track (ADR-0022).
     risk_pct: float = Field(default=0.0, ge=0.0)
     color: RiskColor = Field(default="green")
+    # Cross-camera re-ID (ADR-0022/0023): store-global person id + their risk
+    # accumulated across the store's cameras. None when re-ID is disabled.
+    store_person_id: int | None = Field(default=None)
+    store_risk_pct: float | None = Field(default=None)
 
 
 class FrameMetadata(BaseModel):
@@ -45,6 +48,9 @@ class FrameMetadata(BaseModel):
 class LiveStartRequest(BaseModel):
     camera_id: str = Field(min_length=1, max_length=64)
     rtsp_url: str = Field(min_length=1, description="Source URL — usually MediaMTX")
+    store_id: str | None = Field(
+        default=None, description="Enables store-scoped cross-camera re-ID (ADR-0023)"
+    )
 
 
 class LiveWorkerStatus(BaseModel):
