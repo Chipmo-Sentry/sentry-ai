@@ -15,14 +15,18 @@ Dimensions (default weights):
   5. wrist_to_torso (5.0)   — wrist held near hip (only when "holding")
   6. rapid_movement (1.5)   — wrist velocity spike (only when "holding")
 
-Per-track state decays: 0.98 when idle, 0.999 when "holding" (M1: rarely set).
-Score is clamped to 100 for risk_pct display.
+Per-track state decays: 0.98 when idle, 0.999 when "holding".
 
-For M1 we run WITHOUT shelf zones or COCO item detection. That means
-`item_pickup` doesn't fire and `holding` stays False, which in turn means
-dims 5 and 6 mostly stay quiet. Dims 1, 3, 4 still produce signal —
-enough to demo "person acting suspicious" (lots of looking around +
-crouching) trends.
+Scoring model (ADR-0022): the scorer accumulates a RAW weighted score; callers
+convert it to a 0-100 `risk_pct` via `normalize_pct()` anchored so a definite
+concealment sequence ≈ 100%. Bands: raw green_max→30%, yellow_max→70%,
+red_max→100%. "Picking up an item" is normal shopping (modest weight); the
+determinative signal is CONCEALMENT — hiding a held item on the body.
+
+Object (COCO item) detection IS wired (yolo_det.py + camera_worker), so
+`item_pickup`/`holding` and the concealment dims (5, 6) fire when an item is
+detected near a wrist. Custom merchandise detection (vs generic COCO) is future
+work needing labeled store data.
 """
 
 from __future__ import annotations
@@ -48,24 +52,33 @@ KP_R_WRIST = 10
 KP_L_HIP = 11
 KP_R_HIP = 12
 
-# === Defaults (M1; per-camera tuning in L4 follow-up) ===
+# === Default raw weights (ADR-0022 anchoring; DB-tunable via /api/v1/behaviors) ===
+# Re-anchored so picking an item up is modest (normal shopping) and CONCEALMENT
+# is the determinative signal. Starting points — tune against real footage.
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "looking_around": 1.5,
-    "item_pickup": 15.0,
-    "body_block": 3.0,
-    "crouch": 1.0,
-    "wrist_to_torso": 5.0,
-    "rapid_movement": 1.5,
+    "looking_around": 2.0,
+    "item_pickup": 6.0,  # picking up is normal — modest; just enables `holding`
+    "body_block": 4.0,
+    "crouch": 1.5,
+    "wrist_to_torso": 8.0,  # CONCEALMENT — hiding a held item on the body
+    "rapid_movement": 2.0,
+    "loitering": 2.0,  # dwelling in one spot (scanning before acting)
 }
 
 SCORE_DECAY_IDLE = 0.98
 SCORE_DECAY_HOLDING = 0.999
 STALE_TRACK_SEC = 5.0
 
-# Default ABSOLUTE accumulated-score thresholds (no longer percent).
+# Raw-score band edges. normalize_pct maps green_max→30%, yellow_max→70%,
+# red_max→100% so the 0-100 risk_pct matches the spec bands (ADR-0022).
 # Overridden at runtime by backend's /api/v1/behaviors config (live tuning).
 DEFAULT_GREEN_MAX = 5.0
 DEFAULT_YELLOW_MAX = 15.0
+DEFAULT_RED_MAX = 30.0  # raw score that maps to 100% (≈ a full concealment seq)
+
+# Loitering: same centroid (within radius) for this long → suspicious dwell.
+LOITER_RADIUS_FRAC = 0.25  # of person height
+LOITER_SECONDS = 8.0
 
 RiskColor = Literal["green", "yellow", "red"]
 
@@ -76,6 +89,32 @@ def classify_color(score: float, green_max: float, yellow_max: float) -> RiskCol
     if score < yellow_max:
         return "yellow"
     return "red"
+
+
+def normalize_pct(
+    raw: float,
+    green_max: float = DEFAULT_GREEN_MAX,
+    yellow_max: float = DEFAULT_YELLOW_MAX,
+    red_max: float = DEFAULT_RED_MAX,
+) -> float:
+    """Map a raw accumulated score to a 0-100 risk_pct (ADR-0022).
+
+    Piecewise-linear so the bands line up with the spec:
+      0..green_max   → 0..30 %   (🟢)
+      green_max..yellow_max → 30..70 %  (🟡)
+      yellow_max..red_max   → 70..100 % (🔴)  (capped at 100)
+    """
+    if raw <= 0 or green_max <= 0:
+        return 0.0
+    if raw <= green_max:
+        return 30.0 * raw / green_max
+    if raw <= yellow_max:
+        span = max(yellow_max - green_max, 1e-6)
+        return 30.0 + 40.0 * (raw - green_max) / span
+    if raw <= red_max:
+        span = max(red_max - yellow_max, 1e-6)
+        return 70.0 + 30.0 * (raw - yellow_max) / span
+    return 100.0
 
 
 def _kp_valid(kp: NDArray[np.float32]) -> bool:
@@ -95,6 +134,10 @@ class TrackState:
     prev_l_wrist: tuple[float, float] | None = None
     prev_r_wrist: tuple[float, float] | None = None
     last_reasons: list[str] = field(default_factory=list)
+    # Loitering: anchor centroid + when the person settled there.
+    loiter_anchor: tuple[float, float] | None = None
+    loiter_since: float | None = None
+    loiter_scored: bool = False
 
 
 class BehaviorScorer:
@@ -110,6 +153,7 @@ class BehaviorScorer:
             self.weights.update(weights)
         self.green_max: float = DEFAULT_GREEN_MAX
         self.yellow_max: float = DEFAULT_YELLOW_MAX
+        self.red_max: float = DEFAULT_RED_MAX
         self._states: dict[int, TrackState] = {}
         self._lock = threading.Lock()
 
@@ -118,11 +162,19 @@ class BehaviorScorer:
         with self._lock:
             self.weights.update(new_weights)
 
-    def update_thresholds(self, green_max: float, yellow_max: float) -> None:
+    def update_thresholds(
+        self, green_max: float, yellow_max: float, red_max: float | None = None
+    ) -> None:
         """Hot-update color band thresholds from backend behavior config."""
         with self._lock:
             self.green_max = green_max
             self.yellow_max = yellow_max
+            if red_max is not None:
+                self.red_max = red_max
+
+    def risk_pct(self, raw_score: float) -> float:
+        """Convert a raw accumulated score to the 0-100 risk_pct (ADR-0022)."""
+        return normalize_pct(raw_score, self.green_max, self.yellow_max, self.red_max)
 
     def score(
         self,
@@ -287,5 +339,24 @@ class BehaviorScorer:
                         delta += self.weights["rapid_movement"]
                         reasons.append("Хурдан хөдөлгөөн")
                 setattr(state, prev_attr, (float(wrist[0]), float(wrist[1])))
+
+        # 7. Loitering — staying in roughly one spot for a long time (casing the
+        # aisle / waiting for staff to look away). Scored once per dwell.
+        if shoulder_cx is not None and hip_cy is not None:
+            centroid = (shoulder_cx, float(hip_cy))
+            now = time.time()
+            radius = person_h * LOITER_RADIUS_FRAC
+            if state.loiter_anchor is None or math.dist(centroid, state.loiter_anchor) > radius:
+                state.loiter_anchor = centroid
+                state.loiter_since = now
+                state.loiter_scored = False
+            elif (
+                state.loiter_since is not None
+                and not state.loiter_scored
+                and (now - state.loiter_since) >= LOITER_SECONDS
+            ):
+                delta += self.weights.get("loitering", 0.0)
+                reasons.append("Удаан зогсох")
+                state.loiter_scored = True
 
         return delta, reasons

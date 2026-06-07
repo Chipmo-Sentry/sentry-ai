@@ -8,6 +8,7 @@ from functools import lru_cache
 from sentry_ai.live_worker.camera_worker import CameraWorker
 from sentry_ai.live_worker.config_poller import get_config_poller
 from sentry_ai.live_worker.emitter import MetadataEmitter
+from sentry_ai.live_worker.reid import HistogramEmbedder, StorePersonRegistry
 from sentry_ai.live_worker.schemas import LiveWorkerStatus
 from sentry_ai.logging_setup import get_logger
 
@@ -20,8 +21,21 @@ class LiveWorkerManager:
         self._lock = threading.Lock()
         self._emitter = MetadataEmitter()
         self._emitter_started = False
+        # One re-ID registry per store (ADR-0023 store-affinity: a store's cameras
+        # all run on THIS node, so in-process is sufficient). Shared embedder.
+        self._registries: dict[str, StorePersonRegistry] = {}
+        self._embedder = HistogramEmbedder()
 
-    def start_camera(self, camera_id: str, rtsp_url: str, frame_skip: int = 3) -> None:
+    def _get_registry(self, store_id: str) -> StorePersonRegistry:
+        reg = self._registries.get(store_id)
+        if reg is None:
+            reg = StorePersonRegistry()
+            self._registries[store_id] = reg
+        return reg
+
+    def start_camera(
+        self, camera_id: str, rtsp_url: str, frame_skip: int = 3, store_id: str | None = None
+    ) -> None:
         with self._lock:
             if not self._emitter_started:
                 self._emitter.start()
@@ -36,11 +50,15 @@ class LiveWorkerManager:
                 # URL changed → restart
                 existing.stop()
 
+            registry = self._get_registry(store_id) if store_id else None
             worker = CameraWorker(
                 camera_id=camera_id,
                 rtsp_url=rtsp_url,
                 emitter=self._emitter,
                 frame_skip=frame_skip,
+                store_id=store_id,
+                registry=registry,
+                embedder=self._embedder if registry is not None else None,
             )
             worker.start()
             self._workers[camera_id] = worker

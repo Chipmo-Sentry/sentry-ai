@@ -41,7 +41,7 @@ def start(req: LiveStartRequest) -> dict[str, str]:
             detail="Live RTSP workers must not run on Railway — deploy sentry-ai on the GPU/VPS host",
         )
     _validate_rtsp_url(req.rtsp_url)
-    get_manager().start_camera(req.camera_id, req.rtsp_url)
+    get_manager().start_camera(req.camera_id, req.rtsp_url, store_id=req.store_id)
     return {"camera_id": req.camera_id, "status": "starting"}
 
 
