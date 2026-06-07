@@ -127,7 +127,9 @@ class StorePersonRegistry:
             pid = self._next_id
             self._next_id += 1
             self._people[pid] = StorePerson(
-                person_id=pid, embedding=embedding.astype(np.float32), last_seen=ts,
+                person_id=pid,
+                embedding=embedding.astype(np.float32),
+                last_seen=ts,
                 cameras={camera_id},
             )
             return pid
