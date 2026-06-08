@@ -261,7 +261,9 @@ class TrackState:
     # Temporal smoothing: consecutive-frame counters per noisy dim.
     streak: dict[str, int] = field(default_factory=dict)
     # Sequence engine: ordered (behavior_key, ts) history + awarded rule keys.
-    events: deque[tuple[str, float]] = field(default_factory=lambda: deque(maxlen=_EVENT_HISTORY_CAP))
+    events: deque[tuple[str, float]] = field(
+        default_factory=lambda: deque(maxlen=_EVENT_HISTORY_CAP)
+    )
     awarded: set[str] = field(default_factory=set)
     # Loitering: anchor centroid + when the person settled there.
     loiter_anchor: tuple[float, float] | None = None
@@ -525,9 +527,13 @@ class BehaviorScorer:
                     continue
                 hit = False
                 for wrist in (l_wrist, r_wrist):
-                    if _kp_valid(wrist) and math.dist(
-                        (float(wrist[0]), float(wrist[1])), (float(hip[0]), float(hip[1]))
-                    ) < radius:
+                    if (
+                        _kp_valid(wrist)
+                        and math.dist(
+                            (float(wrist[0]), float(wrist[1])), (float(hip[0]), float(hip[1]))
+                        )
+                        < radius
+                    ):
                         hit = True
                         break
                 if hit:
@@ -620,9 +626,7 @@ class BehaviorScorer:
         return bonus, awarded, critical
 
     @staticmethod
-    def _pattern_present(
-        events: deque[tuple[str, float]], pattern: tuple[str, ...]
-    ) -> bool:
+    def _pattern_present(events: deque[tuple[str, float]], pattern: tuple[str, ...]) -> bool:
         """True if `pattern` appears as an ordered subsequence of `events`.
         Pattern items may be concrete behavior keys or meta-tokens."""
         idx = 0
