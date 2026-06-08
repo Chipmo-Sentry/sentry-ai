@@ -58,7 +58,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             manager = get_manager()
             for cam_id, rtsp_url in _parse_auto_start(settings.live_auto_start):
                 log.info("live.auto_start", camera_id=cam_id, rtsp_url=rtsp_url)
-                manager.start_camera(cam_id, rtsp_url, frame_skip=settings.live_frame_skip)
+                manager.start_camera(
+                    cam_id,
+                    rtsp_url,
+                    frame_skip=settings.live_frame_skip,
+                    store_id=settings.live_auto_start_store_id,
+                )
 
     # AI-node heartbeat (only runs when paired).
     from sentry_ai.heartbeat import heartbeat_loop

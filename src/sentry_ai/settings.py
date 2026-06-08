@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # Example:
     #   live_auto_start="cam1_hik=rtsp://localhost:8554/cam1_hik,cam2_unv=rtsp://localhost:8554/cam2_unv"
     live_auto_start: str = ""
+    # Store id applied to ALL auto-started cameras so they share one cross-camera
+    # re-ID registry (ADR-0023) → the same person gets the same store_person_id
+    # across the store's cameras. None = per-camera ids only.
+    live_auto_start_store_id: str | None = None
     live_frame_skip: int = 3  # analyze every Nth frame (10 FPS on 30 FPS source)
 
     # YOLO weights (#3). Pose drives ALL behavior detection, so accuracy here is
