@@ -1,6 +1,5 @@
 """FastAPI application entrypoint for sentry-ai."""
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -65,15 +64,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                     store_id=settings.live_auto_start_store_id,
                 )
 
-    # AI-node heartbeat (only runs when paired).
-    from sentry_ai.heartbeat import heartbeat_loop
+    # AI-node heartbeat — own daemon thread (resilient to event-loop starvation
+    # from the GPU worker threads; an asyncio task here stops beating under load).
+    from sentry_ai.heartbeat import start_heartbeat, stop_heartbeat
 
-    hb_task = asyncio.create_task(heartbeat_loop())
+    start_heartbeat()
 
     yield
 
     log.info("stopping")
-    hb_task.cancel()
+    stop_heartbeat()
     get_manager().stop_all()
     await close_client()
 

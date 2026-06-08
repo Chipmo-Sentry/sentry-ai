@@ -5,11 +5,17 @@ to /api/v1/ai-nodes/heartbeat every `heartbeat_interval_sec` using the node's
 ai_node JWT (settings.sentry_backend_service_token). Best-effort: failures are
 logged, never fatal. The response carries the central config (enabled,
 provider, frame_skip) which we expose for new workers to read.
+
+Runs in its OWN daemon THREAD with a synchronous httpx client (NOT an asyncio
+task on the FastAPI event loop). The live workers are CPU/GPU-heavy threads; an
+asyncio heartbeat on the main loop gets starved under load and stops beating —
+which made the node flap to "offline" in superadmin even while it was healthy.
+A dedicated thread (same pattern as the metadata emitter) beats reliably.
 """
 
 from __future__ import annotations
 
-import asyncio
+import threading
 
 import httpx
 
@@ -23,21 +29,23 @@ log = get_logger("sentry_ai.heartbeat")
 # workers). None until the first successful heartbeat.
 current_config: dict[str, object] | None = None
 
-
 # MediaMTX (ingest) control API — same probe server-control.ps1 uses for health.
 _INGEST_PROBE_URL = "http://127.0.0.1:9997/v3/config/global/get"
 
+_stop = threading.Event()
+_thread: threading.Thread | None = None
 
-async def _probe(client: httpx.AsyncClient, url: str) -> bool:
+
+def _probe(client: httpx.Client, url: str) -> bool:
     """True if `url` answers below 500 within a short timeout. Never raises."""
     try:
-        resp = await client.get(url, timeout=3.0)
+        resp = client.get(url, timeout=3.0)
         return resp.status_code < 500
     except Exception:  # noqa: BLE001 — any failure = down
         return False
 
 
-async def _telemetry(client: httpx.AsyncClient) -> dict[str, object]:
+def _telemetry(client: httpx.Client) -> dict[str, object]:
     settings = get_settings()
     mgr = get_manager()
     statuses = mgr.status()
@@ -49,8 +57,8 @@ async def _telemetry(client: httpx.AsyncClient) -> dict[str, object]:
     # anyone RDP-ing into this box. `ai` is implicitly up (we're sending this).
     health = {
         "ai": True,
-        "ollama": await _probe(client, settings.ollama_base_url.rstrip("/") + "/api/tags"),
-        "ingest": await _probe(client, _INGEST_PROBE_URL),
+        "ollama": _probe(client, settings.ollama_base_url.rstrip("/") + "/api/tags"),
+        "ingest": _probe(client, _INGEST_PROBE_URL),
     }
 
     # Resource load (CPU/RAM/GPU) for the superadmin observability dashboard
@@ -68,12 +76,12 @@ async def _telemetry(client: httpx.AsyncClient) -> dict[str, object]:
     }
 
 
-async def _beat(client: httpx.AsyncClient) -> None:
+def _beat(client: httpx.Client) -> None:
     global current_config
     settings = get_settings()
     url = settings.sentry_backend_url.rstrip("/") + "/api/v1/ai-nodes/heartbeat"
     headers = {"Authorization": f"Bearer {settings.sentry_backend_service_token}"}
-    resp = await client.post(url, json=await _telemetry(client), headers=headers, timeout=15.0)
+    resp = client.post(url, json=_telemetry(client), headers=headers, timeout=15.0)
     if resp.status_code == 200:
         current_config = resp.json()
     elif resp.status_code == 401:
@@ -83,17 +91,34 @@ async def _beat(client: httpx.AsyncClient) -> None:
         log.warning("heartbeat.http_error", status=resp.status_code)
 
 
-async def heartbeat_loop() -> None:
+def _run() -> None:
+    settings = get_settings()
+    interval = max(15, settings.heartbeat_interval_sec)
+    log.info("heartbeat.started", node_id=settings.ai_node_id, interval=interval)
+    with httpx.Client() as client:
+        while not _stop.is_set():
+            try:
+                _beat(client)
+            except Exception:  # noqa: BLE001 — heartbeat must never crash the thread
+                log.warning("heartbeat.failed", exc_info=True)
+            _stop.wait(interval)
+
+
+def start_heartbeat() -> None:
+    """Start the heartbeat daemon thread (no-op if not paired or already running)."""
+    global _thread
     settings = get_settings()
     if not settings.ai_node_id:
         log.info("heartbeat.disabled", reason="not paired (no ai_node_id)")
         return
-    interval = max(15, settings.heartbeat_interval_sec)
-    log.info("heartbeat.started", node_id=settings.ai_node_id, interval=interval)
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await _beat(client)
-            except Exception:  # noqa: BLE001 — heartbeat must never crash the app
-                log.warning("heartbeat.failed", exc_info=True)
-            await asyncio.sleep(interval)
+    if _thread is not None and _thread.is_alive():
+        return
+    _stop.clear()
+    _thread = threading.Thread(target=_run, name="ai-node-heartbeat", daemon=True)
+    _thread.start()
+
+
+def stop_heartbeat() -> None:
+    _stop.set()
+    if _thread is not None:
+        _thread.join(timeout=2.0)
