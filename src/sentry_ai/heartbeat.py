@@ -6,24 +6,29 @@ ai_node JWT (settings.sentry_backend_service_token). Best-effort: failures are
 logged, never fatal. The response carries the central config (enabled,
 provider, frame_skip) which we expose for new workers to read.
 
-Runs in its OWN daemon THREAD with a synchronous httpx client (NOT an asyncio
-task on the FastAPI event loop). The live workers are CPU/GPU-heavy threads; an
-asyncio heartbeat on the main loop gets starved under load and stops beating —
-which made the node flap to "offline" in superadmin even while it was healthy.
-A dedicated thread (same pattern as the metadata emitter) beats reliably.
+Runs as its OWN child PROCESS (`python -m sentry_ai.heartbeat_cli`), spawned by
+the app lifespan. An in-process heartbeat (asyncio task OR daemon thread) gets
+starved/killed by the GPU live-workers — the worker threads hold the GIL and
+their torch CUDA context appears to wedge the heartbeat thread's NVML calls, so
+the node flapped to "offline" even while healthy. A separate process has no
+workers, no torch, no CUDA — it just beats, and reads the worker count over HTTP
+from the running app. Bulletproof.
 """
 
 from __future__ import annotations
 
-import threading
+import subprocess
+import sys
 
 import httpx
 
-from sentry_ai.live_worker import get_manager
 from sentry_ai.logging_setup import get_logger
 from sentry_ai.settings import get_settings
 
 log = get_logger("sentry_ai.heartbeat")
+
+# Local app URL — the heartbeat process reads live-worker stats from here.
+_LOCAL_APP = "http://127.0.0.1:8001"
 
 # Latest config pushed from the backend (read by the manager when starting
 # workers). None until the first successful heartbeat.
@@ -32,8 +37,7 @@ current_config: dict[str, object] | None = None
 # MediaMTX (ingest) control API — same probe server-control.ps1 uses for health.
 _INGEST_PROBE_URL = "http://127.0.0.1:9997/v3/config/global/get"
 
-_stop = threading.Event()
-_thread: threading.Thread | None = None
+_proc: subprocess.Popen[bytes] | None = None
 
 
 def _probe(client: httpx.Client, url: str) -> bool:
@@ -45,18 +49,27 @@ def _probe(client: httpx.Client, url: str) -> bool:
         return False
 
 
+def _worker_stats(client: httpx.Client) -> tuple[float, int]:
+    """(sum_fps, active_cameras) read from the running app over HTTP, since the
+    heartbeat process has no in-process live-worker manager of its own."""
+    try:
+        r = client.get(_LOCAL_APP + "/v1/live/status", timeout=3.0)
+        workers = [w for w in r.json().get("workers", []) if w.get("running")]
+        fps = sum(float(w.get("fps_inference") or 0.0) for w in workers)
+        return round(fps, 1), len(workers)
+    except Exception:  # noqa: BLE001 — app momentarily unreachable → report 0
+        return 0.0, 0
+
+
 def _telemetry(client: httpx.Client) -> dict[str, object]:
     settings = get_settings()
-    mgr = get_manager()
-    statuses = mgr.status()
-    running = [s for s in statuses if s.running]
-    fps = sum(s.fps_inference for s in running)
+    fps, active = _worker_stats(client)
     from sentry_ai import __version__
 
     # Per-dependency health, probed locally so superadmin can show it without
-    # anyone RDP-ing into this box. `ai` is implicitly up (we're sending this).
+    # anyone RDP-ing into this box. `ai` is the app being up (we probe it).
     health = {
-        "ai": True,
+        "ai": _probe(client, _LOCAL_APP + "/healthz"),
         "ollama": _probe(client, settings.ollama_base_url.rstrip("/") + "/api/tags"),
         "ingest": _probe(client, _INGEST_PROBE_URL),
     }
@@ -68,8 +81,8 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
     resources = system_metrics.sample().as_dict()
 
     return {
-        "fps_inference": round(fps, 1),
-        "active_cameras": len(running),
+        "fps_inference": fps,
+        "active_cameras": active,
         "version": __version__,
         "health": health,
         **resources,
@@ -77,48 +90,51 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
 
 
 def _beat(client: httpx.Client) -> None:
-    global current_config
     settings = get_settings()
     url = settings.sentry_backend_url.rstrip("/") + "/api/v1/ai-nodes/heartbeat"
     headers = {"Authorization": f"Bearer {settings.sentry_backend_service_token}"}
     resp = client.post(url, json=_telemetry(client), headers=headers, timeout=15.0)
-    if resp.status_code == 200:
-        current_config = resp.json()
-    elif resp.status_code == 401:
-        # Node was revoked (or token invalid) — stop trying noisily.
+    if resp.status_code == 401:
         log.warning("heartbeat.unauthorized", detail="node revoked or token invalid")
-    else:
+    elif resp.status_code != 200:
         log.warning("heartbeat.http_error", status=resp.status_code)
 
 
-def _run() -> None:
-    settings = get_settings()
-    interval = max(15, settings.heartbeat_interval_sec)
-    log.info("heartbeat.started", node_id=settings.ai_node_id, interval=interval)
-    with httpx.Client() as client:
-        while not _stop.is_set():
-            try:
-                _beat(client)
-            except Exception:  # noqa: BLE001 — heartbeat must never crash the thread
-                log.warning("heartbeat.failed", exc_info=True)
-            _stop.wait(interval)
+def run_forever() -> None:
+    """Heartbeat loop — the entrypoint of the `sentry_ai.heartbeat_cli` process."""
+    import time
 
-
-def start_heartbeat() -> None:
-    """Start the heartbeat daemon thread (no-op if not paired or already running)."""
-    global _thread
     settings = get_settings()
     if not settings.ai_node_id:
         log.info("heartbeat.disabled", reason="not paired (no ai_node_id)")
         return
-    if _thread is not None and _thread.is_alive():
+    interval = max(15, settings.heartbeat_interval_sec)
+    log.info("heartbeat.started", node_id=settings.ai_node_id, interval=interval, mode="process")
+    with httpx.Client() as client:
+        while True:
+            try:
+                _beat(client)
+            except Exception:  # noqa: BLE001 — heartbeat must never crash
+                log.warning("heartbeat.failed", exc_info=True)
+            time.sleep(interval)
+
+
+def start_heartbeat() -> None:
+    """Spawn the heartbeat as a separate child process (immune to the GPU
+    workers starving/wedging an in-process thread). No-op if not paired."""
+    global _proc
+    settings = get_settings()
+    if not settings.ai_node_id:
+        log.info("heartbeat.disabled", reason="not paired (no ai_node_id)")
         return
-    _stop.clear()
-    _thread = threading.Thread(target=_run, name="ai-node-heartbeat", daemon=True)
-    _thread.start()
+    if _proc is not None and _proc.poll() is None:
+        return
+    _proc = subprocess.Popen([sys.executable, "-m", "sentry_ai.heartbeat_cli"])  # noqa: S603
+    log.info("heartbeat.process_spawned", pid=_proc.pid)
 
 
 def stop_heartbeat() -> None:
-    _stop.set()
-    if _thread is not None:
-        _thread.join(timeout=2.0)
+    global _proc
+    if _proc is not None and _proc.poll() is None:
+        _proc.terminate()
+    _proc = None
