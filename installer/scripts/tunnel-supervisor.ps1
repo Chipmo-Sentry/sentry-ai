@@ -106,7 +106,9 @@ function Rewire([string]$hls, [string]$ai) {
     Log "URLs changed but config\railway-token.txt missing - set Railway envs manually: HLS=$hls AI=$ai"
     return
   }
-  $tok = (Get-Content $tokenFile -Raw).Trim()
+  # Take only the first whitespace-delimited token, so a trailing name/comment
+  # in the file (e.g. '<uuid> "Claude_AI_Predator 4"') doesn't corrupt it.
+  $tok = ((Get-Content $tokenFile -Raw) -split '\s+' | Where-Object { $_ } | Select-Object -First 1)
   try {
     Rw-Upsert $tok $RW.Frontend 'NEXT_PUBLIC_MEDIAMTX_HLS_BASE'  $hls
     Rw-Upsert $tok $RW.Frontend 'NEXT_PUBLIC_MEDIAMTX_WHEP_BASE' $hls
