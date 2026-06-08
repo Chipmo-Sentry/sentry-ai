@@ -119,9 +119,11 @@ class YoloPoseRunner:
         kpts_xy: NDArray[np.float32] | None = None
         if r.keypoints is not None and r.keypoints.xy is not None:
             xy = r.keypoints.xy.cpu().numpy().astype(np.float32)  # (N, 17, 2)
-            conf = getattr(r.keypoints, "conf", None)
-            if conf is not None:
-                c = conf.cpu().numpy().astype(np.float32)[..., None]  # (N, 17, 1)
+            # NB: must NOT reuse the name `conf` here — that is the box-score
+            # array used below for `Detection.score`. Shadowing it broke inference.
+            kp_conf = getattr(r.keypoints, "conf", None)
+            if kp_conf is not None:
+                c = kp_conf.cpu().numpy().astype(np.float32)[..., None]  # (N, 17, 1)
                 kpts_xy = np.concatenate([xy, c], axis=2)  # (N, 17, 3)
             else:
                 kpts_xy = xy
