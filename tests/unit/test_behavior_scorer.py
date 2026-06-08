@@ -1,6 +1,6 @@
-"""BehaviorScorer — color bands, decay, weight/threshold hot-update, item pickup.
-
-Pure logic: builds synthetic COCO-17 keypoint arrays, no YOLO/torch needed.
+"""Behavior Engine v2 — levels, state machine, sequences, confidence gating,
+temporal smoothing, bag/pocket detectors. Pure logic: synthetic COCO-17
+keypoints, no YOLO/torch needed.
 """
 
 from __future__ import annotations
@@ -10,8 +10,14 @@ import numpy as np
 from sentry_ai.live_worker.behavior import (
     DEFAULT_GREEN_MAX,
     DEFAULT_YELLOW_MAX,
+    MIN_KP_CONF,
+    SMOOTH_FRAMES,
     BehaviorScorer,
+    BehaviorState,
+    ScoreResult,
+    clamp_pct,
     classify_color,
+    risk_level,
 )
 from sentry_ai.live_worker.yolo_det import Item
 
@@ -21,170 +27,311 @@ L_SHOULDER, R_SHOULDER = 5, 6
 L_WRIST, R_WRIST = 9, 10
 L_HIP, R_HIP = 11, 12
 
-
-def _blank_kps() -> np.ndarray:
-    """17x2 array, all (0,0) = 'not detected'."""
-    return np.zeros((17, 2), dtype=np.float32)
+PERSON_H = 200.0
 
 
-def _neutral_person() -> np.ndarray:
-    """A calmly-standing person — face centered over shoulders, normal torso."""
-    kps = _blank_kps()
-    # Shoulders centered at x=100
-    kps[L_SHOULDER] = (90, 100)
-    kps[R_SHOULDER] = (110, 100)
-    # Eyes centered at x=100 too (no looking around)
-    kps[L_EYE] = (96, 60)
-    kps[R_EYE] = (104, 60)
-    # Hips well below shoulders (tall torso, no crouch)
-    kps[L_HIP] = (92, 300)
-    kps[R_HIP] = (108, 300)
-    return kps
+def _kp3() -> np.ndarray:
+    """17x3 array [x, y, conf], all zero = 'not detected'."""
+    return np.zeros((17, 3), dtype=np.float32)
 
 
-# === classify_color ===
+def _neutral() -> np.ndarray:
+    """A calmly-standing person — face centered over shoulders, tall torso,
+    all keypoints high-confidence."""
+    k = _kp3()
+    k[L_SHOULDER] = (90, 100, 1.0)
+    k[R_SHOULDER] = (110, 100, 1.0)
+    k[L_EYE] = (96, 60, 1.0)
+    k[R_EYE] = (104, 60, 1.0)
+    k[L_HIP] = (92, 300, 1.0)
+    k[R_HIP] = (108, 300, 1.0)
+    return k
 
 
-def test_classify_color_bands() -> None:
-    assert classify_color(0.0, 5.0, 15.0) == "green"
-    assert classify_color(4.9, 5.0, 15.0) == "green"
-    assert classify_color(5.0, 5.0, 15.0) == "yellow"
-    assert classify_color(14.9, 5.0, 15.0) == "yellow"
-    assert classify_color(15.0, 5.0, 15.0) == "red"
-    assert classify_color(100.0, 5.0, 15.0) == "red"
+def _looking() -> np.ndarray:
+    """Neutral but face swung far right of the shoulders."""
+    k = _neutral()
+    k[L_EYE] = (300, 60, 1.0)
+    k[R_EYE] = (308, 60, 1.0)
+    return k
+
+
+# === level / color / clamp helpers ===
+
+
+def test_risk_level_bands() -> None:
+    assert risk_level(0.0) == "LOW"
+    assert risk_level(10.0) == "LOW"
+    assert risk_level(10.1) == "MEDIUM"
+    assert risk_level(25.0) == "MEDIUM"
+    assert risk_level(25.1) == "HIGH"
+    assert risk_level(50.0) == "HIGH"
+    assert risk_level(50.1) == "CRITICAL"
+    assert risk_level(100.0) == "CRITICAL"
+
+
+def test_classify_color_on_pct() -> None:
+    assert classify_color(0.0, 10.0, 25.0) == "green"
+    assert classify_color(10.0, 10.0, 25.0) == "green"
+    assert classify_color(10.1, 10.0, 25.0) == "yellow"
+    assert classify_color(25.0, 10.0, 25.0) == "yellow"
+    assert classify_color(25.1, 10.0, 25.0) == "red"
+
+
+def test_clamp_pct_caps_0_100() -> None:
+    assert clamp_pct(-5.0) == 0.0
+    assert clamp_pct(30.0) == 30.0
+    assert clamp_pct(150.0) == 100.0
 
 
 def test_default_thresholds_sane() -> None:
     assert DEFAULT_GREEN_MAX < DEFAULT_YELLOW_MAX
 
 
-# === Score is unbounded (no clamp to 100) ===
+# === absolute scoring + decay ===
 
 
-def test_score_not_clamped_to_100() -> None:
+def test_score_returns_result_and_is_absolute() -> None:
     scorer = BehaviorScorer(weights={"looking_around": 50.0})
-    kps = _neutral_person()
-    # Force looking-around: move eyes far right of shoulders
-    kps[L_EYE] = (300, 60)
-    kps[R_EYE] = (308, 60)
-    person_h = 200.0
-    # Accumulate several frames
-    last = 0.0
-    for _ in range(5):
-        last, _color, _reasons = scorer.score(1, kps, person_h)
-    # 5 frames × 50 weight (minus decay) should well exceed 100
-    assert last > 100.0
-
-
-# === Decay ===
+    k = _looking()
+    last: ScoreResult | None = None
+    for _ in range(SMOOTH_FRAMES):
+        last = scorer.score(1, k, PERSON_H)
+    assert last is not None
+    # 50 weight fired once smoothing satisfied → well into the bands, capped 100.
+    assert 0.0 < last.risk_pct <= 100.0
+    assert last.risk_pct == clamp_pct(last.raw_score)
 
 
 def test_idle_score_decays() -> None:
+    scorer = BehaviorScorer(weights={"looking_around": 20.0})
+    k = _looking()
+    for _ in range(SMOOTH_FRAMES):
+        seeded = scorer.score(1, k, PERSON_H)
+    decayed = scorer.score(1, _kp3(), PERSON_H)  # blank → no triggers, decays
+    assert decayed.raw_score < seeded.raw_score
+
+
+# === temporal smoothing (#2) ===
+
+
+def test_looking_around_needs_consecutive_frames() -> None:
     scorer = BehaviorScorer()
-    # Seed a score via looking-around, then feed blank frames (no triggers)
-    kps = _neutral_person()
-    kps[L_EYE] = (300, 60)
-    kps[R_EYE] = (308, 60)
-    scorer.score(1, kps, 200.0)
-    seeded, _, _ = scorer.score(1, kps, 200.0)
-
-    blank = _blank_kps()
-    decayed, _, _ = scorer.score(1, blank, 200.0)
-    assert decayed < seeded  # idle decay 0.98
+    k = _looking()
+    # First SMOOTH_FRAMES-1 frames: not enough persistence → no score.
+    for _ in range(SMOOTH_FRAMES - 1):
+        r = scorer.score(1, k, PERSON_H)
+        assert "Орчноо харах" not in r.reasons
+    # On the SMOOTH_FRAMES-th consecutive frame it fires.
+    r = scorer.score(1, k, PERSON_H)
+    assert "Орчноо харах" in r.reasons
 
 
-# === Weight / threshold hot-update ===
-
-
-def test_update_thresholds_changes_color() -> None:
+def test_intermittent_looking_never_fires() -> None:
     scorer = BehaviorScorer()
-    # Manually set a known score via repeated looking_around
-    kps = _neutral_person()
-    kps[L_EYE] = (300, 60)
-    kps[R_EYE] = (308, 60)
-    score = 0.0
-    for _ in range(3):
-        score, _, _ = scorer.score(1, kps, 200.0)
-
-    # With very high thresholds, same score is green
-    scorer.update_thresholds(green_max=score + 100, yellow_max=score + 200)
-    _, color_hi, _ = scorer.score(1, _blank_kps(), 200.0)
-    assert color_hi == "green"
-
-    # With very low thresholds, it's red
-    scorer.update_thresholds(green_max=0.1, yellow_max=0.2)
-    _, color_lo, _ = scorer.score(2, kps, 200.0)
-    assert color_lo in ("yellow", "red")
+    look, calm = _looking(), _neutral()
+    fired = False
+    for i in range(8):
+        r = scorer.score(1, look if i % 2 == 0 else calm, PERSON_H)
+        fired = fired or ("Орчноо харах" in r.reasons)
+    assert not fired  # streak keeps resetting
 
 
-def test_update_weights_affects_delta() -> None:
-    low = BehaviorScorer(weights={"looking_around": 1.0})
-    high = BehaviorScorer(weights={"looking_around": 10.0})
-    kps = _neutral_person()
-    kps[L_EYE] = (300, 60)
-    kps[R_EYE] = (308, 60)
-    s_low, _, _ = low.score(1, kps, 200.0)
-    s_high, _, _ = high.score(1, kps, 200.0)
-    assert s_high > s_low
+# === keypoint confidence gating (#1) ===
 
 
-# === item_pickup → holding ===
+def test_low_confidence_joints_ignored() -> None:
+    scorer = BehaviorScorer()
+    k = _looking()
+    k[L_EYE] = (300, 60, 0.1)  # below MIN_KP_CONF
+    k[R_EYE] = (308, 60, 0.1)
+    assert MIN_KP_CONF > 0.1
+    for _ in range(SMOOTH_FRAMES + 2):
+        r = scorer.score(1, k, PERSON_H)
+    assert "Орчноо харах" not in r.reasons  # eyes gated out → no face center
 
 
-def test_item_pickup_sets_holding_and_scores() -> None:
-    scorer = BehaviorScorer(weights={"item_pickup": 15.0})
-    kps = _neutral_person()
-    # Put left wrist at a known location
-    kps[L_WRIST] = (200, 150)
-    # An item bbox surrounding that wrist
+def test_legacy_xy_keypoints_still_work() -> None:
+    """(17,2) arrays (no confidence column) must still score on coordinates."""
+    scorer = BehaviorScorer()
+    k = _looking()[:, :2].copy()  # drop confidence column
+    for _ in range(SMOOTH_FRAMES):
+        r = scorer.score(1, k, PERSON_H)
+    assert "Орчноо харах" in r.reasons
+
+
+# === item pickup → holding → PRODUCT_INTERACTION ===
+
+
+def test_item_pickup_sets_state_and_scores() -> None:
+    scorer = BehaviorScorer()
+    k = _neutral()
+    k[L_WRIST] = (200, 150, 1.0)
     item = Item(label="cell phone", box=(180, 130, 220, 170), score=0.9)
-
-    score, _color, reasons = scorer.score(1, kps, 200.0, items=[item])
-    assert score >= 15.0 * 0.98  # weight added (minus one decay tick)
-    assert any("авах" in r for r in reasons)
+    r = scorer.score(1, k, PERSON_H, items=[item])
+    assert any("авах" in x for x in r.reasons)
+    assert r.state >= BehaviorState.PRODUCT_INTERACTION
 
 
 def test_no_item_no_pickup() -> None:
-    scorer = BehaviorScorer(weights={"item_pickup": 15.0})
-    kps = _neutral_person()
-    kps[L_WRIST] = (200, 150)
-    # Item far from wrist
+    scorer = BehaviorScorer()
+    k = _neutral()
+    k[L_WRIST] = (200, 150, 1.0)
     item = Item(label="bottle", box=(0, 0, 10, 10), score=0.9)
-    score, _color, reasons = scorer.score(1, kps, 200.0, items=[item])
-    assert not any("авах" in r for r in reasons)
-    assert score == 0.0
+    r = scorer.score(1, k, PERSON_H, items=[item])
+    assert not any("авах" in x for x in r.reasons)
+    assert r.raw_score == 0.0
+    assert r.state == BehaviorState.IDLE
 
 
-# === Stale cleanup ===
+# === bag / pocket detectors ===
+
+
+def _pick_up(scorer: BehaviorScorer, tid: int = 1) -> None:
+    """Drive one pickup frame so the track is `holding`."""
+    k = _neutral()
+    k[L_WRIST] = (200, 150, 1.0)
+    item = Item(label="cell phone", box=(180, 130, 220, 170), score=0.9)
+    scorer.score(tid, k, PERSON_H, items=[item])
+
+
+def test_bag_interaction_when_holding() -> None:
+    scorer = BehaviorScorer()
+    _pick_up(scorer)
+    k = _neutral()
+    k[L_WRIST] = (400, 250, 1.0)
+    bag = Item(label="handbag", box=(380, 230, 440, 290), score=0.8)
+    r = scorer.score(1, k, PERSON_H, items=[bag])
+    assert "Гар уут руу" in r.reasons
+
+
+def test_pocket_interaction_when_holding() -> None:
+    scorer = BehaviorScorer()
+    _pick_up(scorer)
+    k = _neutral()
+    k[L_WRIST] = (92, 300, 1.0)  # right on the left hip keypoint
+    r = scorer.score(1, k, PERSON_H, items=[])
+    assert "Халаас руу" in r.reasons
+
+
+# === sequence engine ===
+
+
+def test_pickup_then_wrist_awards_sequence_bonus() -> None:
+    scorer = BehaviorScorer()
+    _pick_up(scorer)
+    # 8 near-torso frames → one wrist_to_torso event (fires on the 8th).
+    k = _neutral()
+    k[L_WRIST] = (200, 300, 1.0)  # at hip Y, far in X (no pocket)
+    last = None
+    for _ in range(8):
+        last = scorer.score(1, k, PERSON_H, items=[])
+    assert last is not None
+    assert "seq_pickup_wrist" in last.sequences
+
+
+def test_concealment_sequence_is_critical_alert() -> None:
+    scorer = BehaviorScorer()
+    _pick_up(scorer)
+    k = _neutral()
+    k[L_WRIST] = (200, 300, 1.0)
+    for _ in range(8):  # → wrist_to_torso event
+        scorer.score(1, k, PERSON_H, items=[])
+    # Now hide in the pocket (conceal_hide finisher).
+    kp = _neutral()
+    kp[L_WRIST] = (92, 300, 1.0)
+    r = scorer.score(1, kp, PERSON_H, items=[])
+    assert "concealment_sequence" in r.sequences
+    assert r.state == BehaviorState.ALERT
+    assert r.level == "CRITICAL"
+
+
+# === state machine progression ===
+
+
+def test_state_progresses_idle_to_suspicious() -> None:
+    scorer = BehaviorScorer()
+    k = _looking()
+    last = None
+    for _ in range(SMOOTH_FRAMES):
+        last = scorer.score(1, k, PERSON_H)
+    assert last is not None
+    assert last.state >= BehaviorState.SUSPICIOUS
+
+
+def test_state_resets_to_idle_when_calm() -> None:
+    scorer = BehaviorScorer(weights={"looking_around": 4.0})
+    k = _looking()
+    for _ in range(SMOOTH_FRAMES):
+        scorer.score(1, k, PERSON_H)
+    # Feed many calm blank frames → decays to LOW, not holding → IDLE.
+    last = None
+    for _ in range(60):
+        last = scorer.score(1, _kp3(), PERSON_H)
+    assert last is not None
+    assert last.state == BehaviorState.IDLE
+
+
+# === weight / threshold hot-update ===
+
+
+def test_update_weights_affects_score() -> None:
+    low = BehaviorScorer(weights={"looking_around": 1.0})
+    high = BehaviorScorer(weights={"looking_around": 10.0})
+    k = _looking()
+    rl = rh = None
+    for _ in range(SMOOTH_FRAMES):
+        rl = low.score(1, k, PERSON_H)
+        rh = high.score(1, k, PERSON_H)
+    assert rh.raw_score > rl.raw_score
+
+
+def test_update_thresholds_changes_level_cutoffs() -> None:
+    scorer = BehaviorScorer()
+    scorer.update_thresholds(green_max=40.0, yellow_max=60.0, red_max=80.0)
+    assert scorer.green_max == 40.0
+    assert scorer.yellow_max == 60.0
+    assert scorer.high_max == 80.0
+
+
+def test_level_reflects_tuned_thresholds() -> None:
+    """Regression (review M1/M2): the emitted level must follow the scorer's
+    tunable thresholds, not fixed module constants."""
+    scorer = BehaviorScorer()
+    # Default: pct 30 → HIGH (25 < 30 ≤ 50).
+    assert scorer.level_for(30.0) == "HIGH"
+    # Raise the cutoffs → the same pct is now MEDIUM.
+    scorer.update_thresholds(green_max=20.0, yellow_max=40.0, red_max=70.0)
+    assert scorer.level_for(30.0) == "MEDIUM"
+    assert scorer.level_for(80.0) == "CRITICAL"
+
+
+# === robustness ===
 
 
 def test_cleanup_stale_removes_old_tracks() -> None:
-    scorer = BehaviorScorer()
-    scorer.score(1, _neutral_person(), 200.0)
-    scorer.score(2, _neutral_person(), 200.0)
-    # Force last_seen far in the past
     import time
 
+    scorer = BehaviorScorer()
+    scorer.score(1, _neutral(), PERSON_H)
+    scorer.score(2, _neutral(), PERSON_H)
     for st in scorer._states.values():
         st.last_seen = time.time() - 999
-    removed = scorer.cleanup_stale()
-    assert removed == 2
+    assert scorer.cleanup_stale() == 2
     assert len(scorer._states) == 0
-
-
-# === Missing keypoints don't crash ===
 
 
 def test_blank_keypoints_no_score() -> None:
     scorer = BehaviorScorer()
-    score, color, reasons = scorer.score(1, _blank_kps(), 200.0)
-    assert score == 0.0
-    assert color == "green"
-    assert reasons == []
+    r = scorer.score(1, _kp3(), PERSON_H)
+    assert r.raw_score == 0.0
+    assert r.color == "green"
+    assert r.level == "LOW"
+    assert r.reasons == []
 
 
 def test_none_keypoints_safe() -> None:
     scorer = BehaviorScorer()
-    score, color, _ = scorer.score(1, None, 200.0)
-    assert score == 0.0
-    assert color == "green"
+    r = scorer.score(1, None, PERSON_H)
+    assert r.raw_score == 0.0
+    assert r.state == BehaviorState.IDLE

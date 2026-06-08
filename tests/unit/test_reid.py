@@ -8,6 +8,7 @@ from sentry_ai.live_worker.reid import (
     HistogramEmbedder,
     StorePersonRegistry,
     cosine,
+    make_embedder,
 )
 
 
@@ -15,6 +16,22 @@ def _solid(color: tuple[int, int, int], h: int = 40, w: int = 20) -> np.ndarray:
     img = np.zeros((h, w, 3), dtype=np.uint8)
     img[:, :] = color
     return img
+
+
+def test_make_embedder_histogram_default() -> None:
+    assert isinstance(make_embedder("histogram"), HistogramEmbedder)
+    assert isinstance(make_embedder(""), HistogramEmbedder)
+
+
+def test_make_embedder_unknown_falls_back() -> None:
+    assert isinstance(make_embedder("does-not-exist"), HistogramEmbedder)
+
+
+def test_make_embedder_osnet_falls_back_when_unavailable() -> None:
+    # torchreid isn't installed in CI → must fall back to a working embedder.
+    emb = make_embedder("osnet")
+    vec = emb.embed(_solid((0, 0, 200)), (0, 0, 20, 40))
+    assert vec is not None and abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5
 
 
 def test_embedder_normalized_and_distinguishes_colors() -> None:

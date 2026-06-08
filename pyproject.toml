@@ -71,7 +71,7 @@ mypy_path = "src"
 packages = ["sentry_ai"]
 
 [[tool.mypy.overrides]]
-module = ["ffmpeg.*", "ultralytics.*", "supervision.*", "cv2.*", "pynvml.*", "psutil.*"]
+module = ["ffmpeg.*", "ultralytics.*", "supervision.*", "cv2.*", "pynvml.*", "psutil.*", "torch.*", "torchreid.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

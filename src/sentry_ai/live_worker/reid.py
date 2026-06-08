@@ -24,6 +24,10 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from sentry_ai.logging_setup import get_logger
+
+log = get_logger("sentry_ai.live_worker.reid")
+
 Box = tuple[float, float, float, float]
 
 
@@ -61,6 +65,62 @@ class HistogramEmbedder:
         if norm == 0.0:
             return None
         return vec / norm
+
+
+class OSNetEmbedder:
+    """Learned re-ID embedding via torchreid's OSNet (#4).
+
+    Far more robust than the color histogram — distinguishes people in similar
+    clothing. Requires the optional `torchreid` + `torch` deps and (ideally) a
+    GPU. Construction raises if torchreid is unavailable, so `make_embedder`
+    falls back to the histogram. Produces an L2-normalized feature vector.
+    """
+
+    def __init__(self, model_name: str = "osnet_x0_25", device: str | None = None) -> None:
+        # Lazy heavy imports — raise so the factory can fall back gracefully.
+        import torch  # noqa: PLC0415
+        from torchreid.utils import FeatureExtractor  # noqa: PLC0415
+
+        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._extractor = FeatureExtractor(model_name=model_name, device=dev)
+        log.info("reid.osnet_loaded", model=model_name, device=dev)
+
+    def embed(self, frame_bgr: NDArray[np.uint8], box: Box) -> NDArray[np.float32] | None:
+        import cv2  # noqa: PLC0415
+
+        h, w = frame_bgr.shape[:2]
+        x1, y1, x2, y2 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        crop = frame_bgr[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        # torchreid expects RGB HWC; FeatureExtractor accepts a list of ndarrays.
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        raw = self._extractor([rgb]).cpu().numpy()[0]
+        feats: NDArray[np.float32] = np.asarray(raw, dtype=np.float32)
+        norm = float(np.linalg.norm(feats))
+        if norm == 0.0:
+            return None
+        return feats / norm
+
+
+def make_embedder(name: str = "histogram") -> Embedder:
+    """Resolve a re-ID embedder by name, falling back to the histogram if the
+    requested learned model can't be loaded (missing deps / no GPU)."""
+    key = (name or "histogram").lower()
+    if key in ("histogram", "hist", ""):
+        return HistogramEmbedder()
+    if key in ("osnet", "torchreid"):
+        try:
+            return OSNetEmbedder()
+        except Exception as e:  # noqa: BLE001 — any import/load failure → fallback
+            log.warning("reid.osnet_unavailable_fallback_histogram", error=str(e))
+            return HistogramEmbedder()
+    log.warning("reid.unknown_embedder_fallback_histogram", requested=key)
+    return HistogramEmbedder()
 
 
 def cosine(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:

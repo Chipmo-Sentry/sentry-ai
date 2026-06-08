@@ -63,11 +63,11 @@ def test_loitering_scores_after_dwell(monkeypatch) -> None:
     monkeypatch.setattr(bx.time, "time", lambda: t[0])
 
     # First frame anchors the dwell — no loiter score yet.
-    s0, _, _ = scorer.score(1, kps, person_h)
+    scorer.score(1, kps, person_h)
     # Advance past the loiter window while staying put → loiter fires.
-    t[0] += bx.LOITER_SECONDS + 1
-    _, _, reasons = scorer.score(1, kps, person_h)
-    assert any("Удаан зогсох" in r for r in reasons)
+    t[0] += scorer.loiter_seconds + 1
+    r = scorer.score(1, kps, person_h)
+    assert any("Удаан зогсох" in x for x in r.reasons)
 
 
 def test_moving_person_does_not_loiter(monkeypatch) -> None:
@@ -79,7 +79,7 @@ def test_moving_person_does_not_loiter(monkeypatch) -> None:
     monkeypatch.setattr(bx.time, "time", lambda: t[0])
 
     scorer.score(1, _person_at(100.0, 300.0), person_h)
-    t[0] += bx.LOITER_SECONDS + 1
+    t[0] += scorer.loiter_seconds + 1
     # Moved far → anchor resets, no loiter.
-    _, _, reasons = scorer.score(1, _person_at(900.0, 300.0), person_h)
-    assert not any("Удаан зогсох" in r for r in reasons)
+    r = scorer.score(1, _person_at(900.0, 300.0), person_h)
+    assert not any("Удаан зогсох" in x for x in r.reasons)

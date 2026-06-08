@@ -32,10 +32,11 @@ PERSON_CLASS = 0
 class Detection:
     box: tuple[float, float, float, float]  # (x1, y1, x2, y2) pixels
     score: float  # 0.0-1.0
-    # COCO-17 pose keypoints. Shape (17, 2) = [x, y] per joint.
-    # Order: nose, l_eye, r_eye, l_ear, r_ear, l_shoulder, r_shoulder, l_elbow,
-    # r_elbow, l_wrist, r_wrist, l_hip, r_hip, l_knee, r_knee, l_ankle, r_ankle.
-    # Values are pixel coords in the input frame; (0, 0) means "not detected".
+    # COCO-17 pose keypoints. Shape (17, 3) = [x, y, conf] per joint (conf is the
+    # 3rd column when the model supplies it; (17, 2) otherwise — both accepted by
+    # the behavior engine). Order: nose, l_eye, r_eye, l_ear, r_ear, l_shoulder,
+    # r_shoulder, l_elbow, r_elbow, l_wrist, r_wrist, l_hip, r_hip, l_knee,
+    # r_knee, l_ankle, r_ankle. Pixel coords; (0, 0) means "not detected".
     # None if model is not pose-capable (defensive default).
     keypoints: NDArray[np.float32] | None = None
 
@@ -75,8 +76,11 @@ class YoloPoseRunner:
     def __init__(self, conf: float = 0.35, iou: float = 0.45) -> None:
         self.conf = conf
         self.iou = iou
-        # Trigger lazy load eagerly on construct so first frame inference is fast
-        _load_model()
+        # Trigger lazy load eagerly on construct so first frame inference is fast.
+        # Weights configurable (#3) — default yolo11s-pose for better keypoints.
+        from sentry_ai.settings import get_settings
+
+        _load_model(get_settings().yolo_pose_weights)
 
     def detect_persons(self, frame_bgr: NDArray[np.uint8]) -> list[Detection]:
         """Run inference on a single BGR frame, return person detections.
@@ -108,10 +112,19 @@ class YoloPoseRunner:
         xyxy = boxes.xyxy.cpu().numpy()  # (N, 4)
         conf = boxes.conf.cpu().numpy()  # (N,)
 
-        # Pose keypoints (only present on pose models). r.keypoints.xy: (N, 17, 2)
+        # Pose keypoints (only present on pose models). r.keypoints.xy: (N, 17, 2),
+        # r.keypoints.conf: (N, 17). Stack into (N, 17, 3) [x, y, conf] so the
+        # behavior engine can gate low-confidence joints (#1). Fall back to (N,17,2)
+        # if confidence isn't available.
         kpts_xy: NDArray[np.float32] | None = None
         if r.keypoints is not None and r.keypoints.xy is not None:
-            kpts_xy = r.keypoints.xy.cpu().numpy().astype(np.float32)
+            xy = r.keypoints.xy.cpu().numpy().astype(np.float32)  # (N, 17, 2)
+            conf = getattr(r.keypoints, "conf", None)
+            if conf is not None:
+                c = conf.cpu().numpy().astype(np.float32)[..., None]  # (N, 17, 1)
+                kpts_xy = np.concatenate([xy, c], axis=2)  # (N, 17, 3)
+            else:
+                kpts_xy = xy
 
         out: list[Detection] = []
         for i in range(xyxy.shape[0]):

@@ -52,6 +52,19 @@ class Settings(BaseSettings):
     live_auto_start: str = ""
     live_frame_skip: int = 3  # analyze every Nth frame (10 FPS on 30 FPS source)
 
+    # YOLO weights (#3). Pose drives ALL behavior detection, so accuracy here is
+    # foundational — default to the "s" model (better keypoints than "n", still
+    # fast on an RTX 4060). Ultralytics auto-downloads on first run. Override to
+    # yolo11n-pose.pt for low-power CPU hosts, or yolo11m-pose.pt for max accuracy.
+    yolo_pose_weights: str = "yolo11s-pose.pt"
+    yolo_item_weights: str = "yolo11n.pt"
+
+    # Cross-camera re-ID embedder (#4). "histogram" = dependency-light color
+    # histogram (default, weak). "osnet" = learned torchreid OSNet (robust, needs
+    # the optional torchreid+torch deps + ideally a GPU; falls back to histogram
+    # if unavailable). See live_worker/reid.py::make_embedder.
+    reid_model: str = "histogram"
+
     # --- Service auth + input hardening (enforce-if-configured) ---
     # Shared secret required as `Authorization: Bearer <token>` on /v1/* routes.
     # None/empty → routes are OPEN (trusted-LAN M1 default). Set the SAME value

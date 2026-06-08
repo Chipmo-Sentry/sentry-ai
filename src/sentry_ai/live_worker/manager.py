@@ -8,9 +8,10 @@ from functools import lru_cache
 from sentry_ai.live_worker.camera_worker import CameraWorker
 from sentry_ai.live_worker.config_poller import get_config_poller
 from sentry_ai.live_worker.emitter import MetadataEmitter
-from sentry_ai.live_worker.reid import HistogramEmbedder, StorePersonRegistry
+from sentry_ai.live_worker.reid import StorePersonRegistry, make_embedder
 from sentry_ai.live_worker.schemas import LiveWorkerStatus
 from sentry_ai.logging_setup import get_logger
+from sentry_ai.settings import get_settings
 
 log = get_logger("sentry_ai.live_worker.manager")
 
@@ -24,7 +25,7 @@ class LiveWorkerManager:
         # One re-ID registry per store (ADR-0023 store-affinity: a store's cameras
         # all run on THIS node, so in-process is sufficient). Shared embedder.
         self._registries: dict[str, StorePersonRegistry] = {}
-        self._embedder = HistogramEmbedder()
+        self._embedder = make_embedder(get_settings().reid_model)
 
     def _get_registry(self, store_id: str) -> StorePersonRegistry:
         reg = self._registries.get(store_id)

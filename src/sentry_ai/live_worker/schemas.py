@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 RiskColor = Literal["green", "yellow", "red"]
+RiskLevel = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 
 class TrackPayload(BaseModel):
@@ -21,9 +22,14 @@ class TrackPayload(BaseModel):
         description="(x1, y1, x2, y2) in source frame pixels",
     )
     det_confidence: float = Field(ge=0.0, le=1.0, description="YOLO detection score")
-    # Normalized 0-100 risk for THIS camera's track (ADR-0022).
+    # Absolute 0-100 risk for THIS camera's track (ADR-0024).
     risk_pct: float = Field(default=0.0, ge=0.0)
     color: RiskColor = Field(default="green")
+    # v2 behavior engine (ADR-0024): 4-level band, per-track state-machine state,
+    # and the sequence rules that fired this episode.
+    level: RiskLevel = Field(default="LOW")
+    state: str = Field(default="IDLE", description="Behavior state machine state")
+    sequences: list[str] = Field(default_factory=list, description="Triggered sequence rule keys")
     # Cross-camera re-ID (ADR-0022/0023): store-global person id + their risk
     # accumulated across the store's cameras. None when re-ID is disabled.
     store_person_id: int | None = Field(default=None)

@@ -30,11 +30,11 @@ class BehaviorConfigPoller:
         self._thread: threading.Thread | None = None
         # Callbacks invoked on each successful refresh:
         #   on_weights(dict[str, float])
-        #   on_thresholds(green_max, yellow_max)
+        #   on_thresholds(green_max, yellow_max, high_max)
         self._on_weights: list[Callable[[dict[str, float]], None]] = []
-        self._on_thresholds: list[Callable[[float, float], None]] = []
+        self._on_thresholds: list[Callable[[float, float, float], None]] = []
         self._last_weights: dict[str, float] | None = None
-        self._last_thresholds: tuple[float, float] | None = None
+        self._last_thresholds: tuple[float, float, float] | None = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -58,7 +58,7 @@ class BehaviorConfigPoller:
     def subscribe(
         self,
         on_weights: Callable[[dict[str, float]], None],
-        on_thresholds: Callable[[float, float], None],
+        on_thresholds: Callable[[float, float, float], None],
     ) -> None:
         """Register callbacks; immediately invoked with last-known config if any."""
         with self._lock:
@@ -100,14 +100,17 @@ class BehaviorConfigPoller:
             if "key" in d and "weight" in d
         }
         thresholds = data.get("thresholds", {})
-        green_max = float(thresholds.get("green_max", 5.0))
-        yellow_max = float(thresholds.get("yellow_max", 15.0))
+        # v2 absolute 0-100 defaults (ADR-0024): LOW<10, MEDIUM<25, HIGH<50.
+        green_max = float(thresholds.get("green_max", 10.0))
+        yellow_max = float(thresholds.get("yellow_max", 25.0))
+        high_max = float(thresholds.get("high_max", 50.0))
+        triple = (green_max, yellow_max, high_max)
 
         with self._lock:
             weights_changed = self._last_weights != weights
-            thr_changed = self._last_thresholds != (green_max, yellow_max)
+            thr_changed = self._last_thresholds != triple
             self._last_weights = weights
-            self._last_thresholds = (green_max, yellow_max)
+            self._last_thresholds = triple
             wcbs = list(self._on_weights)
             tcbs = list(self._on_thresholds)
 
@@ -120,7 +123,7 @@ class BehaviorConfigPoller:
         if thr_changed:
             for tcb in tcbs:
                 try:
-                    tcb(green_max, yellow_max)
+                    tcb(green_max, yellow_max, high_max)
                 except Exception:  # noqa: BLE001
                     log.exception("config_poller.thresholds_cb_failed")
         if weights_changed or thr_changed:
@@ -130,6 +133,7 @@ class BehaviorConfigPoller:
                 thr_changed=thr_changed,
                 green_max=green_max,
                 yellow_max=yellow_max,
+                high_max=high_max,
             )
 
 

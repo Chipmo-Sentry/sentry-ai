@@ -81,7 +81,9 @@ class YoloItemRunner:
     def __init__(self, conf: float = 0.35, iou: float = 0.5) -> None:
         self.conf = conf
         self.iou = iou
-        _load_model()
+        from sentry_ai.settings import get_settings
+
+        _load_model(get_settings().yolo_item_weights)
 
     def detect_items(self, frame_bgr: NDArray[np.uint8]) -> list[Item]:
         model, device = _load_model()

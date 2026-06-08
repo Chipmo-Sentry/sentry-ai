@@ -84,7 +84,7 @@ class CameraWorker:
         # Config delivered by poller BEFORE scorer initializes — buffer and
         # apply once scorer is live (fixes config-poller race condition).
         self._pending_weights: dict[str, float] | None = None
-        self._pending_thresholds: tuple[float, float] | None = None
+        self._pending_thresholds: tuple[float, float, float | None] | None = None
 
         # Latest annotated frame for /v1/live/snapshot/{cam} debug endpoint.
         # Stored as JPEG bytes to avoid GIL contention; updated under lock.
@@ -153,12 +153,14 @@ class CameraWorker:
         else:
             self._pending_weights = dict(weights)
 
-    def apply_thresholds(self, green_max: float, yellow_max: float) -> None:
-        """Hot-update color band thresholds from poller. Buffers if scorer not ready."""
+    def apply_thresholds(
+        self, green_max: float, yellow_max: float, high_max: float | None = None
+    ) -> None:
+        """Hot-update level band thresholds from poller. Buffers if scorer not ready."""
         if self._scorer is not None:
-            self._scorer.update_thresholds(green_max, yellow_max)
+            self._scorer.update_thresholds(green_max, yellow_max, high_max)
         else:
-            self._pending_thresholds = (green_max, yellow_max)
+            self._pending_thresholds = (green_max, yellow_max, high_max)
 
     def latest_snapshot(self) -> tuple[bytes, float] | None:
         """Return (jpeg_bytes, unix_ts) of most recent annotated frame, or None."""
@@ -262,18 +264,17 @@ class CameraWorker:
             except Exception:  # noqa: BLE001
                 log.exception("camera.item_det_failed", camera_id=self.camera_id)
 
-        # 6-dim behavior scoring per tracked person → risk_pct + color
+        # v2 behavior engine per tracked person → risk_pct + level + state + color
         tracks_payload: list[TrackPayload] = []
         for t in tracked:
             person_h = max(1.0, t.box[3] - t.box[1])
-            raw_score, color, _reasons = self._scorer.score(
+            result = self._scorer.score(
                 t.tracker_id,
                 t.keypoints,
                 person_h,
                 items=self._cached_items,
             )
-            # Emit a normalized 0-100 risk_pct (ADR-0022), not the raw score.
-            risk_pct = self._scorer.risk_pct(raw_score)
+            risk_pct = result.risk_pct  # absolute 0-100 (ADR-0024)
 
             # Cross-camera re-ID + score accumulation (ADR-0022/0023). Link this
             # person to a store-global id and add this frame's positive increment
@@ -284,10 +285,10 @@ class CameraWorker:
                 emb = self._embedder.embed(frame_bgr, t.box)
                 if emb is not None:
                     store_person_id = self._registry.match_or_create(emb, self.camera_id)
-                    delta = max(0.0, raw_score - self._prev_raw.get(t.tracker_id, 0.0))
+                    delta = max(0.0, result.raw_score - self._prev_raw.get(t.tracker_id, 0.0))
                     store_total = self._registry.add_score(store_person_id, delta)
                     store_risk_pct = self._scorer.risk_pct(store_total)
-            self._prev_raw[t.tracker_id] = raw_score
+            self._prev_raw[t.tracker_id] = result.raw_score
 
             tracks_payload.append(
                 TrackPayload(
@@ -295,7 +296,10 @@ class CameraWorker:
                     box=t.box,
                     det_confidence=t.score,
                     risk_pct=risk_pct,
-                    color=color,
+                    color=result.color,
+                    level=result.level,
+                    state=result.state.name,
+                    sequences=result.sequences,
                     store_person_id=store_person_id,
                     store_risk_pct=store_risk_pct,
                 ),
