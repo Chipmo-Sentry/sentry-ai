@@ -49,6 +49,17 @@ function Get-Spec([string]$name) {
                 Wd   = $cfg.BinDir
             }
         }
+        'tunnels' {
+            # Quick-tunnel supervisor: keeps 2 trycloudflare tunnels alive +
+            # re-points Railway when a URL changes (needs config\railway-token.txt).
+            $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $script = Join-Path $PSScriptRoot 'tunnel-supervisor.ps1'
+            return @{
+                Exe  = $ps
+                Args = ('-NoProfile -ExecutionPolicy Bypass -File "' + $script + '"')
+                Wd   = $cfg.AppRoot
+            }
+        }
     }
 }
 
@@ -77,9 +88,20 @@ function Install-One([string]$name) {
     }
 }
 
-$targets = @('ingest', 'ai')
-if ($TunnelName) { $targets += 'tunnel' }
-else { Write-Host "  (skipping tunnel - no -TunnelName)" -ForegroundColor DarkGray }
+# ingest + ai (long-running) + tunnels (quick-tunnel supervisor + Railway re-wire).
+$targets = @('ingest', 'ai', 'tunnels')
+if ($TunnelName) { $targets += 'tunnel' }  # optional NAMED tunnel (needs a domain)
 
 foreach ($t in $targets) { Install-One $t }
-Write-Host "Services ready. Manage via services.msc or nssm start/stop $($cfg.ServicePrefix)<name>" -ForegroundColor Cyan
+
+# The login-startup shortcut is now redundant (services boot-start everything);
+# remove it so the two don't double-start the tunnels.
+$lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'ChipmoSentryAI.lnk'
+if (Test-Path $lnk) {
+    Remove-Item $lnk -Force -ErrorAction SilentlyContinue
+    Write-Host "  removed redundant login-startup shortcut" -ForegroundColor DarkGray
+}
+
+Write-Host "Services ready (ingest, ai, tunnels). Manage via services.msc or" -ForegroundColor Cyan
+Write-Host "  nssm start/stop $($cfg.ServicePrefix)<name>   (e.g. $($cfg.ServicePrefix)tunnels)" -ForegroundColor Cyan
+Write-Host "Live-video re-wire needs config\railway-token.txt (the project token)." -ForegroundColor Yellow
