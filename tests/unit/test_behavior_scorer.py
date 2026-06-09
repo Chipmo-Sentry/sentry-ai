@@ -335,3 +335,22 @@ def test_none_keypoints_safe() -> None:
     r = scorer.score(1, None, PERSON_H)
     assert r.raw_score == 0.0
     assert r.state == BehaviorState.IDLE
+
+
+def test_update_params_changes_engine_and_detector() -> None:
+    """Hot-tuning engine + per-detector params takes effect and is bad-value safe."""
+    s = BehaviorScorer()
+    assert s._e("smooth_frames") == 3.0
+    assert s._dp("loitering", "seconds", 0.0) == 30.0
+    s.update_params(
+        engine={"smooth_frames": 8, "decay_idle": 0.95},
+        detector={"loitering": {"seconds": 45}, "looking_around": {"offset_frac": 0.25}},
+    )
+    assert s._e("smooth_frames") == 8.0
+    assert s._e("decay_idle") == 0.95
+    assert s.loiter_seconds == 45.0
+    assert s._dp("looking_around", "offset_frac", 0.0) == 0.25
+    # Unknown engine key ignored; non-numeric value skipped (no crash).
+    s.update_params(engine={"bogus": 1, "decay_idle": "nope"})  # type: ignore[dict-item]
+    assert "bogus" not in s.engine
+    assert s._e("decay_idle") == 0.95

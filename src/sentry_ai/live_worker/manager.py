@@ -69,6 +69,7 @@ class LiveWorkerManager:
             get_config_poller().subscribe(
                 on_weights=worker.apply_weights,
                 on_thresholds=worker.apply_thresholds,
+                on_params=worker.apply_params,
             )
 
     def stop_camera(self, camera_id: str) -> bool:

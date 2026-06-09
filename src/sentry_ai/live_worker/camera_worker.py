@@ -31,6 +31,20 @@ log = get_logger("sentry_ai.live_worker.camera")
 # Rolling window for FPS smoothing
 _FPS_WINDOW_SEC = 5.0
 
+# Re-ID quality gate: only skip people too small/far to identify reliably.
+# We deliberately DON'T gate on keypoint visibility — torso cropping already
+# falls back to a body-proportion estimate when shoulders/hips aren't visible,
+# so gating on keypoints wrongly skipped people on overhead/fisheye cameras
+# (hips hidden behind desks) and suppressed cross-camera re-ID entirely.
+_REID_MIN_BOX_FRAC = 0.08
+_REID_MIN_BOX_PX = 64.0
+
+
+def _reid_quality_ok(box: tuple[float, float, float, float], frame_h: int) -> bool:
+    """True if this detection is large enough to produce a usable re-ID vector."""
+    box_h = box[3] - box[1]
+    return box_h >= max(_REID_MIN_BOX_PX, _REID_MIN_BOX_FRAC * frame_h)
+
 
 class CameraWorker:
     def __init__(
@@ -85,6 +99,7 @@ class CameraWorker:
         # apply once scorer is live (fixes config-poller race condition).
         self._pending_weights: dict[str, float] | None = None
         self._pending_thresholds: tuple[float, float, float | None] | None = None
+        self._pending_params: tuple[dict[str, float], dict[str, dict[str, float]]] | None = None
 
         # Latest annotated frame for /v1/live/snapshot/{cam} debug endpoint.
         # Stored as JPEG bytes to avoid GIL contention; updated under lock.
@@ -162,6 +177,18 @@ class CameraWorker:
         else:
             self._pending_thresholds = (green_max, yellow_max, high_max)
 
+    def apply_params(
+        self,
+        engine: dict[str, float],
+        detector: dict[str, dict[str, float]],
+    ) -> None:
+        """Hot-update engine + per-detector tuning params from poller.
+        Buffers if the scorer hasn't initialized yet (same race as weights)."""
+        if self._scorer is not None:
+            self._scorer.update_params(engine, detector)
+        else:
+            self._pending_params = (engine, detector)
+
     def latest_snapshot(self) -> tuple[bytes, float] | None:
         """Return (jpeg_bytes, unix_ts) of most recent annotated frame, or None."""
         with self._snapshot_lock:
@@ -186,6 +213,9 @@ class CameraWorker:
             if self._pending_thresholds is not None:
                 self._scorer.update_thresholds(*self._pending_thresholds)
                 self._pending_thresholds = None
+            if self._pending_params is not None:
+                self._scorer.update_params(*self._pending_params)
+                self._pending_params = None
         except Exception as e:
             self._last_error = f"init failed: {e}"
             log.exception("camera.init_failed", camera_id=self.camera_id)
@@ -281,14 +311,22 @@ class CameraWorker:
             # to their store-wide total, so suspicion built across cameras carries.
             store_person_id: int | None = None
             store_risk_pct: float | None = None
-            if self._registry is not None and self._embedder is not None:
-                emb = self._embedder.embed(frame_bgr, t.box)
+            if (
+                self._registry is not None
+                and self._embedder is not None
+                and _reid_quality_ok(t.box, h)
+            ):
+                # Crop to the torso (via keypoints) and embed — see reid.py.
+                emb = self._embedder.embed(frame_bgr, t.box, t.keypoints)
                 if emb is not None:
                     store_person_id = self._registry.match_or_create(emb, self.camera_id)
                     delta = max(0.0, result.raw_score - self._prev_raw.get(t.tracker_id, 0.0))
                     store_total = self._registry.add_score(store_person_id, delta)
                     store_risk_pct = self._scorer.risk_pct(store_total)
-            self._prev_raw[t.tracker_id] = result.raw_score
+                    # Advance the baseline ONLY when the increment was actually banked,
+                    # so risk built up during low-quality/skipped frames isn't lost — it
+                    # carries to the next frame clear enough to re-identify the person.
+                    self._prev_raw[t.tracker_id] = result.raw_score
 
             tracks_payload.append(
                 TrackPayload(

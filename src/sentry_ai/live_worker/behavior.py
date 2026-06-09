@@ -28,6 +28,7 @@ Per-track state decays: 0.98 when idle, 0.999 when "holding".
 
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
@@ -98,6 +99,32 @@ LOITER_SECONDS = 30.0  # v2 spec default (was 8) — DB-tunable
 # Sequence engine: an ordered pattern must complete within this span to fire.
 SEQUENCE_WINDOW_SEC = 60.0
 _EVENT_HISTORY_CAP = 64
+
+# === Tunable engine params (ADR-0024 v2; hot-tuned from backend /api/v1/behaviors).
+# Global knobs — the backend ships these in the `engine` object; the poller calls
+# BehaviorScorer.update_params(). All have safe code defaults so a partial/missing
+# config never breaks scoring.
+DEFAULT_ENGINE: dict[str, float] = {
+    "smooth_frames": float(SMOOTH_FRAMES),  # consecutive frames a noisy dim must hold before it scores
+    "decay_idle": SCORE_DECAY_IDLE,  # per-frame score decay when NOT holding an item
+    "decay_holding": SCORE_DECAY_HOLDING,  # per-frame decay while holding an item (slower)
+    "sequence_window_sec": SEQUENCE_WINDOW_SEC,  # window for an ordered pattern to complete
+    "loiter_radius_frac": LOITER_RADIUS_FRAC,  # dwell radius as a fraction of person height
+    "stale_track_sec": STALE_TRACK_SEC,  # drop a per-track state unseen this long
+}
+
+# Per-detector sensitivity params. `*_frac` are fractions of the person's height;
+# `cadence` is a frame count; `hold_floor` a minimum score. Each criterion carries
+# these in its catalog `params` object; missing keys fall back to these defaults.
+DEFAULT_DETECTOR_PARAMS: dict[str, dict[str, float]] = {
+    "looking_around": {"offset_frac": 0.15},
+    "body_block": {"collapse_frac": 0.55, "ema_alpha": 0.1},
+    "crouch": {"frac": 0.15, "hold_floor": 5.0},
+    "wrist_to_torso": {"frac": 0.15, "cadence": 8.0},
+    "pocket_interaction": {"radius_frac": 0.12},
+    "rapid_movement": {"frac": 0.08},
+    "loitering": {"seconds": LOITER_SECONDS},
+}
 
 RiskColor = Literal["green", "yellow", "red"]
 RiskLevel = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -286,15 +313,53 @@ class BehaviorScorer:
         self.green_max: float = LEVEL_LOW_MAX
         self.yellow_max: float = LEVEL_MEDIUM_MAX
         self.high_max: float = LEVEL_HIGH_MAX
-        self.loiter_seconds: float = LOITER_SECONDS
+        # Tunable engine + per-detector params (hot-updated by the config poller).
+        self.engine: dict[str, float] = dict(DEFAULT_ENGINE)
+        self.det: dict[str, dict[str, float]] = {k: dict(v) for k, v in DEFAULT_DETECTOR_PARAMS.items()}
+        self.loiter_seconds: float = LOITER_SECONDS  # mirror of det["loitering"]["seconds"]
         self.sequences: tuple[SequenceRule, ...] = DEFAULT_SEQUENCES
         self._states: dict[int, TrackState] = {}
         self._lock = threading.Lock()
+
+    # --- tunable-param accessors (cheap; called per frame) ---
+    def _e(self, name: str) -> float:
+        """Global engine param with a safe default."""
+        return float(self.engine.get(name, DEFAULT_ENGINE[name]))
+
+    def _dp(self, key: str, name: str, default: float) -> float:
+        """Per-detector param with a safe default."""
+        return float(self.det.get(key, {}).get(name, default))
 
     def update_weights(self, new_weights: dict[str, float]) -> None:
         """Hot-update weights from backend behavior config."""
         with self._lock:
             self.weights.update(new_weights)
+
+    def update_params(
+        self,
+        engine: dict[str, float] | None = None,
+        detector: dict[str, dict[str, float]] | None = None,
+    ) -> None:
+        """Hot-update engine + per-detector tuning params from backend config.
+
+        Unknown engine keys are ignored; non-numeric values are skipped so a bad
+        value can never crash the scorer. `smooth_frames`/`cadence` are coerced
+        to a sane floor at read time, not here."""
+        with self._lock:
+            if engine:
+                for k, v in engine.items():
+                    if k in DEFAULT_ENGINE:
+                        with contextlib.suppress(TypeError, ValueError):
+                            self.engine[k] = float(v)
+            if detector:
+                for key, params in detector.items():
+                    if not isinstance(params, dict):
+                        continue
+                    slot = self.det.setdefault(key, {})
+                    for n, v in params.items():
+                        with contextlib.suppress(TypeError, ValueError):
+                            slot[n] = float(v)
+            self.loiter_seconds = float(self.det.get("loitering", {}).get("seconds", LOITER_SECONDS))
 
     def update_thresholds(
         self, green_max: float, yellow_max: float, red_max: float | None = None
@@ -345,7 +410,7 @@ class BehaviorScorer:
             state.last_seen = now
 
             # Decay before adding new evidence.
-            decay = SCORE_DECAY_HOLDING if state.holding else SCORE_DECAY_IDLE
+            decay = self._e("decay_holding") if state.holding else self._e("decay_idle")
             state.score = max(0.0, state.score * decay)
 
             delta = 0.0
@@ -387,7 +452,8 @@ class BehaviorScorer:
         """Drop tracker states unseen for STALE_TRACK_SEC. Returns count removed."""
         now = time.time()
         with self._lock:
-            stale = [tid for tid, s in self._states.items() if now - s.last_seen > STALE_TRACK_SEC]
+            stale_sec = self._e("stale_track_sec")
+            stale = [tid for tid, s in self._states.items() if now - s.last_seen > stale_sec]
             for tid in stale:
                 del self._states[tid]
             return len(stale)
@@ -402,7 +468,8 @@ class BehaviorScorer:
             return False
         n = state.streak.get(key, 0) + 1
         state.streak[key] = n
-        return n >= SMOOTH_FRAMES and (n % SMOOTH_FRAMES == 0)
+        sf = max(1, int(self._e("smooth_frames")))
+        return n >= sf and (n % sf == 0)
 
     def _analyze(
         self,
@@ -441,7 +508,7 @@ class BehaviorScorer:
         looking = (
             face_cx is not None
             and shoulder_cx is not None
-            and abs(face_cx - shoulder_cx) > person_h * 0.15
+            and abs(face_cx - shoulder_cx) > person_h * self._dp("looking_around", "offset_frac", 0.15)
         )
         if self._smoothed(state, "looking_around", looking):
             delta += self.weights.get("looking_around", 0.0)
@@ -473,8 +540,9 @@ class BehaviorScorer:
             if state.avg_shoulder_w is None:
                 state.avg_shoulder_w = float(shoulder_w)
             else:
-                state.avg_shoulder_w = state.avg_shoulder_w * 0.9 + float(shoulder_w) * 0.1
-                block = shoulder_w < state.avg_shoulder_w * 0.55
+                alpha = self._dp("body_block", "ema_alpha", 0.1)
+                state.avg_shoulder_w = state.avg_shoulder_w * (1.0 - alpha) + float(shoulder_w) * alpha
+                block = shoulder_w < state.avg_shoulder_w * self._dp("body_block", "collapse_frac", 0.55)
         if self._smoothed(state, "body_block", block):
             delta += self.weights.get("body_block", 0.0)
             reasons.append("Биеэр далдлах")
@@ -483,10 +551,10 @@ class BehaviorScorer:
         # 4. Crouch — torso vertical extent collapses.
         crouch = False
         if hip_cy is not None and _kp_valid(l_shoulder):
-            crouch = abs(hip_cy - l_shoulder[1]) < person_h * 0.15
+            crouch = abs(hip_cy - l_shoulder[1]) < person_h * self._dp("crouch", "frac", 0.15)
         if self._smoothed(state, "crouch", crouch):
             if state.holding:
-                delta += max(self.weights.get("crouch", 0.0), 5.0)
+                delta += max(self.weights.get("crouch", 0.0), self._dp("crouch", "hold_floor", 5.0))
                 reasons.append("Бөхийж бараа нуух")
             else:
                 delta += self.weights.get("crouch", 0.0)
@@ -499,12 +567,13 @@ class BehaviorScorer:
             for wrist in (l_wrist, r_wrist):
                 if not _kp_valid(wrist):
                     continue
-                if abs(wrist[1] - hip_cy) < person_h * 0.15:
+                if abs(wrist[1] - hip_cy) < person_h * self._dp("wrist_to_torso", "frac", 0.15):
                     near_torso = True
                     break
             if near_torso:
                 state.concealment_frames += 1
-                if state.concealment_frames % 8 == 0:
+                cadence = max(1, int(self._dp("wrist_to_torso", "cadence", 8.0)))
+                if state.concealment_frames % cadence == 0:
                     delta += self.weights.get("wrist_to_torso", 0.0)
                     reasons.append(f"Хувцас доор нуух ({state.concealment_frames}f)")
                     fired.add("wrist_to_torso")
@@ -521,7 +590,7 @@ class BehaviorScorer:
 
         # 7. Pocket interaction — wrist at a hip keypoint while holding.
         if state.holding:
-            radius = person_h * 0.12
+            radius = person_h * self._dp("pocket_interaction", "radius_frac", 0.12)
             for hip in (l_hip, r_hip):
                 if not _kp_valid(hip):
                     continue
@@ -551,7 +620,8 @@ class BehaviorScorer:
             if (
                 prev is not None
                 and state.holding
-                and math.dist((float(wrist[0]), float(wrist[1])), prev) > person_h * 0.08
+                and math.dist((float(wrist[0]), float(wrist[1])), prev)
+                > person_h * self._dp("rapid_movement", "frac", 0.08)
             ):
                 rapid = True
             setattr(state, prev_attr, (float(wrist[0]), float(wrist[1])))
@@ -563,7 +633,7 @@ class BehaviorScorer:
         # 9. Loitering — staying in roughly one spot for a long time.
         if shoulder_cx is not None and hip_cy is not None:
             centroid = (shoulder_cx, float(hip_cy))
-            radius = person_h * LOITER_RADIUS_FRAC
+            radius = person_h * self._e("loiter_radius_frac")
             if state.loiter_anchor is None or math.dist(centroid, state.loiter_anchor) > radius:
                 state.loiter_anchor = centroid
                 state.loiter_since = now
@@ -600,7 +670,7 @@ class BehaviorScorer:
         """Award bonuses for ordered patterns that completed within the window.
         Returns (bonus_total, awarded_keys_this_call, any_critical)."""
         # Prune events outside the window.
-        cutoff = now - SEQUENCE_WINDOW_SEC
+        cutoff = now - self._e("sequence_window_sec")
         while state.events and state.events[0][1] < cutoff:
             state.events.popleft()
         if not state.events:

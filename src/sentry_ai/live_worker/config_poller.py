@@ -22,6 +22,16 @@ POLL_INTERVAL_SEC = 30.0
 REQUEST_TIMEOUT_SEC = 5.0
 
 
+def _num_map(raw: Any) -> dict[str, float]:
+    """Coerce a JSON object into a {str: float} map, dropping non-numeric values."""
+    out: dict[str, float] = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = float(v)
+    return out
+
+
 class BehaviorConfigPoller:
     """Singleton-ish: started by manager.start_camera() on first invocation."""
 
@@ -33,8 +43,11 @@ class BehaviorConfigPoller:
         #   on_thresholds(green_max, yellow_max, high_max)
         self._on_weights: list[Callable[[dict[str, float]], None]] = []
         self._on_thresholds: list[Callable[[float, float, float], None]] = []
+        # on_params(engine: dict, detector: dict[key, dict])
+        self._on_params: list[Callable[[dict[str, float], dict[str, dict[str, float]]], None]] = []
         self._last_weights: dict[str, float] | None = None
         self._last_thresholds: tuple[float, float, float] | None = None
+        self._last_params: tuple[dict[str, float], dict[str, dict[str, float]]] | None = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -59,15 +72,20 @@ class BehaviorConfigPoller:
         self,
         on_weights: Callable[[dict[str, float]], None],
         on_thresholds: Callable[[float, float, float], None],
+        on_params: Callable[[dict[str, float], dict[str, dict[str, float]]], None] | None = None,
     ) -> None:
         """Register callbacks; immediately invoked with last-known config if any."""
         with self._lock:
             self._on_weights.append(on_weights)
             self._on_thresholds.append(on_thresholds)
+            if on_params is not None:
+                self._on_params.append(on_params)
             if self._last_weights is not None:
                 on_weights(self._last_weights)
             if self._last_thresholds is not None:
                 on_thresholds(*self._last_thresholds)
+            if on_params is not None and self._last_params is not None:
+                on_params(*self._last_params)
 
     def _run(self) -> None:
         settings = get_settings()
@@ -106,13 +124,29 @@ class BehaviorConfigPoller:
         high_max = float(thresholds.get("high_max", 50.0))
         triple = (green_max, yellow_max, high_max)
 
+        # Engine globals + per-detector sensitivity params (ADR-0024 v2 tuning).
+        # `engine` is a flat float map; each dimension may carry a `params` object.
+        engine = _num_map(data.get("engine", {}))
+        detector: dict[str, dict[str, float]] = {}
+        for d in data.get("dimensions", []):
+            key = d.get("key")
+            params = d.get("params")
+            if isinstance(key, str) and isinstance(params, dict):
+                p = _num_map(params)
+                if p:
+                    detector[key] = p
+        params_pair = (engine, detector)
+
         with self._lock:
             weights_changed = self._last_weights != weights
             thr_changed = self._last_thresholds != triple
+            params_changed = self._last_params != params_pair
             self._last_weights = weights
             self._last_thresholds = triple
+            self._last_params = params_pair
             wcbs = list(self._on_weights)
             tcbs = list(self._on_thresholds)
+            pcbs = list(self._on_params)
 
         if weights_changed:
             for wcb in wcbs:
@@ -126,7 +160,13 @@ class BehaviorConfigPoller:
                     tcb(green_max, yellow_max, high_max)
                 except Exception:  # noqa: BLE001
                     log.exception("config_poller.thresholds_cb_failed")
-        if weights_changed or thr_changed:
+        if params_changed:
+            for pcb in pcbs:
+                try:
+                    pcb(engine, detector)
+                except Exception:  # noqa: BLE001
+                    log.exception("config_poller.params_cb_failed")
+        if weights_changed or thr_changed or params_changed:
             log.info(
                 "config_poller.refreshed",
                 weights_changed=weights_changed,
