@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -86,19 +87,38 @@ def _find_segments_in_window(
     return overlapping
 
 
-async def _run_ffmpeg(args: list[str], timeout: float = 60.0) -> None:  # noqa: ASYNC109
-    proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+# Hide the ffmpeg console window when the node runs as a GUI/service on Windows.
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_ffmpeg_sync(args: list[str], timeout: float) -> None:
+    """Run ffmpeg to completion synchronously (offloaded via asyncio.to_thread).
+
+    Deliberately uses subprocess.run, NOT asyncio.create_subprocess_exec: the
+    async spawn needs a ProactorEventLoop, but uvicorn runs a SelectorEventLoop
+    on Windows, where create_subprocess_exec raises NotImplementedError — which
+    made EVERY /v1/cut-verify (and /v1/verify) 500 on the Windows AI node, so no
+    live alert/clip was ever produced. A sync call in a worker thread is
+    loop-agnostic and works under any event loop.
+    """
     try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError as e:
-        proc.kill()
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired as e:
         raise ClipCutError(f"ffmpeg timed out after {timeout}s") from e
     if proc.returncode != 0:
         raise ClipCutError(
-            f"ffmpeg exit {proc.returncode}: {stderr.decode('utf-8', 'replace')[-400:]}"
+            f"ffmpeg exit {proc.returncode}: {proc.stderr.decode('utf-8', 'replace')[-400:]}"
         )
+
+
+async def _run_ffmpeg(args: list[str], timeout: float = 60.0) -> None:  # noqa: ASYNC109
+    await asyncio.to_thread(_run_ffmpeg_sync, args, timeout)
 
 
 def _confined_cam_dir(recordings_dir: str, mediamtx_path: str) -> Path:
