@@ -1,6 +1,6 @@
 [project]
 name = "sentry-ai"
-version = "0.4.0"
+version = "0.5.0"
 description = "Chipmo Sentry AI inference — YOLO Stage 1 + VLM Stage 2 (via Ollama)"
 readme = "README.md"
 requires-python = "==3.11.*"
@@ -25,6 +25,12 @@ dependencies = [
     "psutil>=5.9,<7.0",              # CPU% + RAM
     "nvidia-ml-py>=12.0",            # NVML (GPU util/VRAM/temp); no-op without an NVIDIA GPU
 ]
+
+# Learned cross-camera re-ID (REID_MODEL=osnet) needs `torchreid`. The maintained
+# version (OSNet, 1.4.x) ships ONLY from source, not PyPI, so it is intentionally
+# NOT a declared dependency here — install it manually on the GPU node:
+#   uv pip install "torchreid @ git+https://github.com/KaiyangZhou/deep-person-reid.git"
+# Without it, make_embedder() falls back to the HSV-histogram embedder.
 
 [dependency-groups]
 dev = [

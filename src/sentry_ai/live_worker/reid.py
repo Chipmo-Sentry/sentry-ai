@@ -6,12 +6,21 @@ structure; no central DB needed). It matches appearance embeddings across a
 store's cameras within a time window and accumulates each person's risk so a
 thief building suspicion across aisles is caught at any camera.
 
-The `Embedder` is pluggable. The default `HistogramEmbedder` is dependency-light
-(numpy only) but WEAK — people in similar clothing collide. Swap in a learned
-re-ID model (OSNet / torchreid) for production accuracy; that is where labeled
-tuning + GPU budget come in. `StorePersonRegistry` is deliberately a small API so
-a shared backend (Redis / pgvector) can replace the in-memory impl for the rare
-store too large for a single GPU.
+The `Embedder` is pluggable and crops to the **torso** (shoulder→hip) before
+embedding — using pose keypoints when available, a body-proportion fallback
+otherwise — so background, legs, and neighbouring people don't pollute the
+appearance vector.
+
+- `HistogramEmbedder` (default) is dependency-light: a two-band Hue+Saturation
+  HSV histogram (lighting-tolerant, far stronger than a raw RGB histogram but
+  still confused by identical clothing).
+- `OSNetEmbedder` (set `REID_MODEL=osnet`, needs the optional `torchreid` extra)
+  is a learned model that distinguishes people in similar clothing — the right
+  choice for production accuracy.
+
+`StorePersonRegistry` is deliberately a small API so a shared backend (Redis /
+pgvector) can replace the in-memory impl for the rare store too large for a
+single GPU.
 """
 
 from __future__ import annotations
@@ -30,36 +39,114 @@ log = get_logger("sentry_ai.live_worker.reid")
 
 Box = tuple[float, float, float, float]
 
+# COCO-17 keypoint indices used to localise the torso.
+_L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP = 5, 6, 11, 12
+_MIN_KP_CONF = 0.3
+
+# Hue carries clothing-colour identity; saturation is secondary and noisier under
+# lighting changes, so it is down-weighted in the histogram embedding.
+_SAT_WEIGHT = 0.5
+
+
+def _torso_box(box: Box, keypoints: NDArray[np.float32] | None) -> Box:
+    """Return the torso region (shoulder→hip) for a person box.
+
+    Uses the four shoulder/hip keypoints when at least three are confidently
+    detected; otherwise falls back to a body-proportion estimate (central width,
+    upper ~60% of the body). Coordinates are in frame pixels, unclipped.
+    """
+    x1, y1, x2, y2 = box
+    bw = x2 - x1
+    bh = y2 - y1
+    fallback: Box = (x1 + 0.12 * bw, y1 + 0.12 * bh, x2 - 0.12 * bw, y1 + 0.60 * bh)
+
+    if keypoints is None:
+        return fallback
+    shape = getattr(keypoints, "shape", None)
+    if shape is None or len(shape) < 2 or shape[0] <= _R_HIP:
+        return fallback
+
+    has_conf = shape[1] >= 3
+    pts: list[tuple[float, float]] = []
+    for idx in (_L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP):
+        kp = keypoints[idx]
+        x, y = float(kp[0]), float(kp[1])
+        conf = float(kp[2]) if has_conf else 1.0
+        if conf >= _MIN_KP_CONF and (x > 0.0 or y > 0.0):
+            pts.append((x, y))
+    if len(pts) < 3:
+        return fallback
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    tx1, tx2 = min(xs), max(xs)
+    ty1, ty2 = min(ys), max(ys)
+    pad_x = 0.15 * max(1.0, tx2 - tx1)
+    pad_y = 0.10 * max(1.0, ty2 - ty1)
+    return (tx1 - pad_x, ty1 - pad_y, tx2 + pad_x, ty2 + pad_y)
+
+
+def _torso_crop(
+    frame_bgr: NDArray[np.uint8], box: Box, keypoints: NDArray[np.float32] | None
+) -> NDArray[np.uint8] | None:
+    """Slice the torso region out of the frame, clipped to bounds. None if empty."""
+    h, w = frame_bgr.shape[:2]
+    tx1, ty1, tx2, ty2 = _torso_box(box, keypoints)
+    cx1, cy1 = max(0, int(tx1)), max(0, int(ty1))
+    cx2, cy2 = min(w, int(tx2)), min(h, int(ty2))
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None
+    crop = frame_bgr[cy1:cy2, cx1:cx2]
+    return crop if crop.size else None
+
 
 class Embedder(Protocol):
-    """Produces an L2-normalized appearance vector for a person crop."""
+    """Produces an L2-normalized appearance vector for a person's torso."""
 
-    def embed(self, frame_bgr: NDArray[np.uint8], box: Box) -> NDArray[np.float32] | None: ...
+    def embed(
+        self,
+        frame_bgr: NDArray[np.uint8],
+        box: Box,
+        keypoints: NDArray[np.float32] | None = None,
+    ) -> NDArray[np.float32] | None: ...
 
 
 class HistogramEmbedder:
-    """Per-channel color-histogram appearance embedding (numpy-only, L2-norm).
+    """Two-band Hue+Saturation HSV histogram of the torso (numpy + cv2).
 
-    A dependency-light v1: good enough to re-link a person with distinctive
-    clothing across adjacent cameras, but NOT robust (similar outfits collide).
-    Replace with a learned re-ID model for production.
+    Splits the torso crop into an upper and lower band (so a shirt and a
+    belt/trousers contribute separately) and histograms Hue + Saturation per
+    band. Value (brightness) is deliberately dropped to stay lighting-tolerant.
+    Stronger than a raw RGB histogram, but still confuses identical clothing —
+    set `REID_MODEL=osnet` for production accuracy.
     """
 
     def __init__(self, bins: int = 8) -> None:
-        self.bins = bins
+        self.bins = max(2, bins)
 
-    def embed(self, frame_bgr: NDArray[np.uint8], box: Box) -> NDArray[np.float32] | None:
-        h, w = frame_bgr.shape[:2]
-        x1, y1, x2, y2 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 <= x1 or y2 <= y1:
+    def embed(
+        self,
+        frame_bgr: NDArray[np.uint8],
+        box: Box,
+        keypoints: NDArray[np.float32] | None = None,
+    ) -> NDArray[np.float32] | None:
+        import cv2  # noqa: PLC0415 — cv2 is a hard live-worker dep, imported lazily
+
+        crop = _torso_crop(frame_bgr, box, keypoints)
+        if crop is None:
             return None
-        crop = frame_bgr[y1:y2, x1:x2].reshape(-1, 3)
-        if crop.size == 0:
-            return None
-        edges = np.linspace(0, 256, self.bins + 1)
-        parts = [np.histogram(crop[:, c], bins=edges)[0] for c in range(3)]
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        ch = hsv.shape[0]
+        mid = max(1, ch // 2)
+        bands = (hsv[:mid], hsv[mid:] if mid < ch else hsv[:mid])
+
+        parts: list[NDArray[np.float32]] = []
+        for band in bands:
+            hue = cv2.calcHist([band], [0], None, [self.bins * 2], [0, 180]).flatten()
+            sat = cv2.calcHist([band], [1], None, [self.bins], [0, 256]).flatten()
+            parts.append(hue.astype(np.float32))
+            parts.append((sat * _SAT_WEIGHT).astype(np.float32))
+
         vec = np.concatenate(parts).astype(np.float32)
         norm = float(np.linalg.norm(vec))
         if norm == 0.0:
@@ -70,10 +157,11 @@ class HistogramEmbedder:
 class OSNetEmbedder:
     """Learned re-ID embedding via torchreid's OSNet (#4).
 
-    Far more robust than the color histogram — distinguishes people in similar
+    Far more robust than the colour histogram — distinguishes people in similar
     clothing. Requires the optional `torchreid` + `torch` deps and (ideally) a
     GPU. Construction raises if torchreid is unavailable, so `make_embedder`
-    falls back to the histogram. Produces an L2-normalized feature vector.
+    falls back to the histogram. Produces an L2-normalized feature vector of the
+    torso crop.
     """
 
     def __init__(self, model_name: str = "osnet_x0_25", device: str | None = None) -> None:
@@ -85,17 +173,16 @@ class OSNetEmbedder:
         self._extractor = FeatureExtractor(model_name=model_name, device=dev)
         log.info("reid.osnet_loaded", model=model_name, device=dev)
 
-    def embed(self, frame_bgr: NDArray[np.uint8], box: Box) -> NDArray[np.float32] | None:
+    def embed(
+        self,
+        frame_bgr: NDArray[np.uint8],
+        box: Box,
+        keypoints: NDArray[np.float32] | None = None,
+    ) -> NDArray[np.float32] | None:
         import cv2  # noqa: PLC0415
 
-        h, w = frame_bgr.shape[:2]
-        x1, y1, x2, y2 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        crop = frame_bgr[y1:y2, x1:x2]
-        if crop.size == 0:
+        crop = _torso_crop(frame_bgr, box, keypoints)
+        if crop is None:
             return None
         # torchreid expects RGB HWC; FeatureExtractor accepts a list of ndarrays.
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -136,15 +223,32 @@ def cosine(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
 class StorePerson:
     person_id: int
     embedding: NDArray[np.float32]
+    gallery: list[NDArray[np.float32]] = field(default_factory=list)
     score: float = 0.0
     last_seen: float = field(default_factory=time.time)
+    last_camera: str = ""  # most-recent camera (drives spatial-temporal gating)
     cameras: set[str] = field(default_factory=set)
 
 
 class StorePersonRegistry:
     """In-process, store-scoped re-ID + score accumulation. Thread-safe.
 
-    One instance per store (the node holds a dict[store_id → registry]).
+    Matching combines **appearance** with **spatial-temporal** logic, which is the
+    real robustness lever when appearance is ambiguous (e.g. everyone in similar
+    clothing on overhead/fisheye cameras):
+
+    - **Mutual exclusion:** one physical person can't be in two places at once, so
+      a person currently active on a *different* camera (seen within ``coexist_sec``)
+      is excluded as a candidate. This stops two simultaneously-visible people on
+      different cameras from collapsing into one id.
+    - **Same-camera re-entry:** someone who just stepped out of *this* camera's view
+      is matched back on a lower appearance threshold (``same_cam_threshold``) —
+      there's no competing candidate, so weak appearance evidence is enough.
+    - **Gallery:** each person keeps a small gallery of recent embeddings; a
+      candidate is scored by the best (max) similarity over it — robust to drift.
+
+    Assumes cameras have **mostly non-overlapping** fields of view (true for most
+    stores). One instance per store (the node holds a dict[store_id → registry]).
     """
 
     def __init__(
@@ -152,36 +256,68 @@ class StorePersonRegistry:
         match_threshold: float = 0.6,
         window_sec: float = 1800.0,
         ema: float = 0.9,
+        gallery_size: int = 8,
+        coexist_sec: float = 1.0,
+        same_cam_threshold: float = 0.45,
     ) -> None:
         self.match_threshold = match_threshold
         self.window_sec = window_sec
         self.ema = ema
+        self.gallery_size = max(1, gallery_size)
+        # Spatial-temporal params.
+        self.coexist_sec = coexist_sec  # active-elsewhere window → mutual exclusion
+        self.same_cam_threshold = same_cam_threshold  # lenient re-entry threshold
         self._people: dict[int, StorePerson] = {}
         self._next_id = 1
         self._lock = threading.Lock()
+
+    def _appearance_sim(self, embedding: NDArray[np.float32], p: StorePerson) -> float:
+        """Best similarity of an embedding to a person (centroid + gallery)."""
+        sim = cosine(embedding, p.embedding)
+        for g in p.gallery:
+            s = cosine(embedding, g)
+            if s > sim:
+                sim = s
+        return sim
 
     def match_or_create(
         self, embedding: NDArray[np.float32], camera_id: str, now: float | None = None
     ) -> int:
         """Return the store-global person id for this embedding, creating one if no
-        existing person within the time window is similar enough."""
+        eligible existing person is a good enough match."""
         ts = time.time() if now is None else now
         with self._lock:
             self._prune(ts)
             best_id = -1
-            best_sim = self.match_threshold
+            best_sim = -1.0
             for pid, p in self._people.items():
-                sim = cosine(embedding, p.embedding)
-                if sim >= best_sim:
+                # Mutual exclusion: a person active on a DIFFERENT camera right now
+                # is physically there — this detection can't be them.
+                if (
+                    p.last_camera
+                    and p.last_camera != camera_id
+                    and (ts - p.last_seen) < self.coexist_sec
+                ):
+                    continue
+                sim = self._appearance_sim(embedding, p)
+                # Same-camera re-entry tolerates weaker appearance evidence.
+                threshold = (
+                    self.same_cam_threshold if p.last_camera == camera_id else self.match_threshold
+                )
+                if sim >= threshold and sim > best_sim:
                     best_sim = sim
                     best_id = pid
             if best_id != -1:
                 p = self._people[best_id]
-                # EMA-update the appearance so it tracks lighting/pose drift.
+                # EMA-update the centroid (tracks slow drift) + refresh the gallery.
                 p.embedding = (self.ema * p.embedding + (1.0 - self.ema) * embedding).astype(
                     np.float32
                 )
+                p.gallery.append(embedding.astype(np.float32))
+                if len(p.gallery) > self.gallery_size:
+                    p.gallery.pop(0)
                 p.last_seen = ts
+                p.last_camera = camera_id
                 p.cameras.add(camera_id)
                 return best_id
             pid = self._next_id
@@ -189,7 +325,9 @@ class StorePersonRegistry:
             self._people[pid] = StorePerson(
                 person_id=pid,
                 embedding=embedding.astype(np.float32),
+                gallery=[embedding.astype(np.float32)],
                 last_seen=ts,
+                last_camera=camera_id,
                 cameras={camera_id},
             )
             return pid

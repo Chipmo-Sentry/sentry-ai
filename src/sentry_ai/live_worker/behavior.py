@@ -105,7 +105,9 @@ _EVENT_HISTORY_CAP = 64
 # BehaviorScorer.update_params(). All have safe code defaults so a partial/missing
 # config never breaks scoring.
 DEFAULT_ENGINE: dict[str, float] = {
-    "smooth_frames": float(SMOOTH_FRAMES),  # consecutive frames a noisy dim must hold before it scores
+    "smooth_frames": float(
+        SMOOTH_FRAMES
+    ),  # consecutive frames a noisy dim must hold before it scores
     "decay_idle": SCORE_DECAY_IDLE,  # per-frame score decay when NOT holding an item
     "decay_holding": SCORE_DECAY_HOLDING,  # per-frame decay while holding an item (slower)
     "sequence_window_sec": SEQUENCE_WINDOW_SEC,  # window for an ordered pattern to complete
@@ -315,7 +317,9 @@ class BehaviorScorer:
         self.high_max: float = LEVEL_HIGH_MAX
         # Tunable engine + per-detector params (hot-updated by the config poller).
         self.engine: dict[str, float] = dict(DEFAULT_ENGINE)
-        self.det: dict[str, dict[str, float]] = {k: dict(v) for k, v in DEFAULT_DETECTOR_PARAMS.items()}
+        self.det: dict[str, dict[str, float]] = {
+            k: dict(v) for k, v in DEFAULT_DETECTOR_PARAMS.items()
+        }
         self.loiter_seconds: float = LOITER_SECONDS  # mirror of det["loitering"]["seconds"]
         self.sequences: tuple[SequenceRule, ...] = DEFAULT_SEQUENCES
         self._states: dict[int, TrackState] = {}
@@ -359,7 +363,9 @@ class BehaviorScorer:
                     for n, v in params.items():
                         with contextlib.suppress(TypeError, ValueError):
                             slot[n] = float(v)
-            self.loiter_seconds = float(self.det.get("loitering", {}).get("seconds", LOITER_SECONDS))
+            self.loiter_seconds = float(
+                self.det.get("loitering", {}).get("seconds", LOITER_SECONDS)
+            )
 
     def update_thresholds(
         self, green_max: float, yellow_max: float, red_max: float | None = None
@@ -508,7 +514,8 @@ class BehaviorScorer:
         looking = (
             face_cx is not None
             and shoulder_cx is not None
-            and abs(face_cx - shoulder_cx) > person_h * self._dp("looking_around", "offset_frac", 0.15)
+            and abs(face_cx - shoulder_cx)
+            > person_h * self._dp("looking_around", "offset_frac", 0.15)
         )
         if self._smoothed(state, "looking_around", looking):
             delta += self.weights.get("looking_around", 0.0)
@@ -541,8 +548,12 @@ class BehaviorScorer:
                 state.avg_shoulder_w = float(shoulder_w)
             else:
                 alpha = self._dp("body_block", "ema_alpha", 0.1)
-                state.avg_shoulder_w = state.avg_shoulder_w * (1.0 - alpha) + float(shoulder_w) * alpha
-                block = shoulder_w < state.avg_shoulder_w * self._dp("body_block", "collapse_frac", 0.55)
+                state.avg_shoulder_w = (
+                    state.avg_shoulder_w * (1.0 - alpha) + float(shoulder_w) * alpha
+                )
+                block = shoulder_w < state.avg_shoulder_w * self._dp(
+                    "body_block", "collapse_frac", 0.55
+                )
         if self._smoothed(state, "body_block", block):
             delta += self.weights.get("body_block", 0.0)
             reasons.append("Биеэр далдлах")

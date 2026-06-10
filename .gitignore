@@ -37,3 +37,6 @@ yolo11n.pt
 
 # Server installer — CI-downloaded binaries (never commit)
 installer/bin/
+
+# Ad-hoc hot-patch staging copied to the GPU node — scratch, never commit
+_node_patch/
