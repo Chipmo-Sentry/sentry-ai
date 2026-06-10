@@ -56,12 +56,14 @@ class Settings(BaseSettings):
     live_auto_start_store_id: str | None = None
     live_frame_skip: int = 3  # analyze every Nth frame (10 FPS on 30 FPS source)
 
-    # YOLO weights (#3). Pose drives ALL behavior detection, so accuracy here is
-    # foundational — default to the "s" model (better keypoints than "n", still
-    # fast on an RTX 4060). Ultralytics auto-downloads on first run. Override to
-    # yolo11n-pose.pt for low-power CPU hosts, or yolo11m-pose.pt for max accuracy.
-    yolo_pose_weights: str = "yolo11s-pose.pt"
-    yolo_item_weights: str = "yolo11n.pt"
+    # YOLO weights (#3, ADR-0026). Pose drives ALL behavior detection, so accuracy
+    # here is foundational — YOLO26 is NMS-free end-to-end and its RLE head scores
+    # occluded joints better than YOLO11 (+~7 AP COCO-pose). Ultralytics
+    # auto-downloads on first run (needs ultralytics>=8.4). Override to
+    # yolo26n-pose.pt for low-power CPU hosts, yolo26m-pose.pt for max accuracy,
+    # or yolo11s-pose.pt/yolo11n.pt to roll back to the pre-ADR-0026 stack.
+    yolo_pose_weights: str = "yolo26s-pose.pt"
+    yolo_item_weights: str = "yolo26n.pt"
 
     # Cross-camera re-ID embedder (#4). "histogram" = dependency-light color
     # histogram (default, weak). "osnet" = learned torchreid OSNet (robust, needs

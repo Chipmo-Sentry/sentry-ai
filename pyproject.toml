@@ -18,7 +18,7 @@ dependencies = [
     "pillow>=10.0,<12.0",
     "jinja2>=3.1,<4.0",
     # M1-LIVE L2: live per-camera worker (YOLO + tracker)
-    "ultralytics>=8.3,<9.0",         # YOLO11-pose, torch deps included
+    "ultralytics>=8.4,<9.0",         # YOLO26-pose (ADR-0026), torch deps included
     "supervision>=0.25,<1.0",        # ByteTrack + annotation utils
     "opencv-python-headless>=4.10,<5.0",  # cv2.VideoCapture for RTSP pull
     # Observability (docs/19): resource telemetry for the superadmin dashboard.

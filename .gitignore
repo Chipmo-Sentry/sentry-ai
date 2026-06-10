@@ -32,8 +32,7 @@ storage/
 logs/
 
 Thumbs.db
-yolo11n-pose.pt
-yolo11n.pt
+yolo*.pt
 
 # Server installer — CI-downloaded binaries (never commit)
 installer/bin/

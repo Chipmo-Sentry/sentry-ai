@@ -90,6 +90,8 @@ SMOOTH_FRAMES = 3
 _SMOOTHED_DIMS = ("looking_around", "body_block", "crouch", "rapid_movement")
 
 # Keypoint confidence gate (#1) — joints below this are treated as "not detected".
+# Calibrated on YOLO11s-pose; YOLO26's RLE head shifts the confidence
+# distribution (ADR-0026) — re-check against verified_cases before tightening.
 MIN_KP_CONF = 0.3
 
 # Loitering: same centroid (within radius) for this long → suspicious dwell.

@@ -1,4 +1,4 @@
-"""YOLO11-pose inference wrapper.
+"""YOLO pose inference wrapper (YOLO26-pose default — ADR-0026).
 
 Lazy-loads the model on first call (downloads weights ~6 MB from Ultralytics
 hub if missing). Auto-selects CUDA when available, falls back to CPU.
@@ -41,7 +41,7 @@ class Detection:
     keypoints: NDArray[np.float32] | None = None
 
 
-def _load_model(weights: str = "yolo11n-pose.pt") -> tuple[object, str]:
+def _load_model(weights: str = "yolo26s-pose.pt") -> tuple[object, str]:
     """Singleton model load. ultralytics.YOLO caches weights in ~/.cache.
 
     Returns (model, device_str). device_str = 'cuda:0' or 'cpu'.
@@ -77,7 +77,7 @@ class YoloPoseRunner:
         self.conf = conf
         self.iou = iou
         # Trigger lazy load eagerly on construct so first frame inference is fast.
-        # Weights configurable (#3) — default yolo11s-pose for better keypoints.
+        # Weights configurable (#3) — default yolo26s-pose (ADR-0026).
         from sentry_ai.settings import get_settings
 
         _load_model(get_settings().yolo_pose_weights)
@@ -147,7 +147,7 @@ def get_device() -> str | None:
     return _DEVICE
 
 
-def weights_cached(weights: str = "yolo11n-pose.pt") -> bool:
+def weights_cached(weights: str = "yolo26s-pose.pt") -> bool:
     """Best-effort check whether weights are already on disk (skips download log)."""
     # ultralytics default cache: ~/.config/Ultralytics/ OR cwd
     candidates = [

@@ -1139,7 +1139,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.4,<3.0" },
     { name = "structlog", specifier = ">=24.2,<26.0" },
     { name = "supervision", specifier = ">=0.25,<1.0" },
-    { name = "ultralytics", specifier = ">=8.3,<9.0" },
+    { name = "ultralytics", specifier = ">=8.4,<9.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<0.40" },
 ]
 

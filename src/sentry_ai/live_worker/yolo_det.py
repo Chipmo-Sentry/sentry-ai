@@ -47,7 +47,7 @@ class Item:
     score: float  # 0.0-1.0
 
 
-def _load_model(weights: str = "yolo11n.pt") -> tuple[object, str]:
+def _load_model(weights: str = "yolo26n.pt") -> tuple[object, str]:
     global _MODEL, _DEVICE
     if _MODEL is not None and _DEVICE is not None:
         return _MODEL, _DEVICE
