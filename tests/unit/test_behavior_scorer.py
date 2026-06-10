@@ -214,6 +214,56 @@ def test_pocket_interaction_when_holding() -> None:
     assert "Халаас руу" in r.reasons
 
 
+# === hold-latch release (T06/H1) ===
+
+
+def test_holding_releases_after_item_free_frames() -> None:
+    """Once a track picks up an item it is `holding`; after HOLD_RELEASE_FRAMES
+    consecutive frames with no item contact and no concealment, `holding` clears."""
+    scorer = BehaviorScorer()
+    _pick_up(scorer)
+    st = scorer._states[1]
+    assert st.holding is True
+    release_after = int(scorer._e("hold_release_frames"))
+    # Feed neutral frames with no items and wrist away from hips/bags.
+    k = _neutral()
+    k[L_WRIST] = (150, 90, 1.0)  # mid-air, not near hip / not on any item
+    k[R_WRIST] = (50, 90, 1.0)
+    for _ in range(release_after):
+        scorer.score(1, k, PERSON_H, items=[])
+    assert st.holding is False
+    assert st.concealment_frames == 0
+
+
+def test_holding_persists_while_in_contact() -> None:
+    """Ongoing wrist-on-item contact keeps the latch alive past the release window."""
+    scorer = BehaviorScorer()
+    release_after = int(scorer._e("hold_release_frames"))
+    k = _neutral()
+    k[L_WRIST] = (200, 150, 1.0)
+    item = Item(label="cell phone", box=(180, 130, 220, 170), score=0.9)
+    for _ in range(release_after + 5):
+        scorer.score(1, k, PERSON_H, items=[item])
+    assert scorer._states[1].holding is True
+
+
+def test_released_track_can_return_to_idle() -> None:
+    """After the hold latch releases, a calmed-down track resets to IDLE — the
+    bug (T06/H1) was that `holding` stayed True forever and blocked this reset."""
+    scorer = BehaviorScorer()
+    _pick_up(scorer)
+    k = _neutral()
+    k[L_WRIST] = (150, 90, 1.0)
+    k[R_WRIST] = (50, 90, 1.0)
+    last = None
+    # Enough frames to both release the latch and decay the score back to LOW.
+    for _ in range(200):
+        last = scorer.score(1, k, PERSON_H, items=[])
+    assert last is not None
+    assert scorer._states[1].holding is False
+    assert last.state == BehaviorState.IDLE
+
+
 # === sequence engine ===
 
 

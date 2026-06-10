@@ -73,6 +73,15 @@ SCORE_DECAY_IDLE = 0.98
 SCORE_DECAY_HOLDING = 0.999
 STALE_TRACK_SEC = 5.0
 
+# Hold release (T06/H1): once `holding` is set, it must clear again when the
+# person is no longer in contact with a held item. A track is released back to
+# not-holding after this many consecutive analyzed frames with NO hold-supporting
+# signal (wrist on an item bbox, or any concealment activity this frame).
+# Without this, a single COCO pickup pins `holding=True` forever → permanent hold
+# decay, the IDLE reset never fires, and bag/pocket/concealment detectors stay
+# armed on a normal shopper. DB-tunable via the `engine` config.
+HOLD_RELEASE_FRAMES = 30
+
 # === Risk levels (absolute 0-100, ADR-0024) ===
 LEVEL_LOW_MAX = 10.0  # 0-10   LOW    🟢
 LEVEL_MEDIUM_MAX = 25.0  # 11-25  MEDIUM 🟡
@@ -115,6 +124,9 @@ DEFAULT_ENGINE: dict[str, float] = {
     "sequence_window_sec": SEQUENCE_WINDOW_SEC,  # window for an ordered pattern to complete
     "loiter_radius_frac": LOITER_RADIUS_FRAC,  # dwell radius as a fraction of person height
     "stale_track_sec": STALE_TRACK_SEC,  # drop a per-track state unseen this long
+    "hold_release_frames": float(
+        HOLD_RELEASE_FRAMES
+    ),  # consecutive item-free frames before `holding` clears (T06/H1)
 }
 
 # Per-detector sensitivity params. `*_frac` are fractions of the person's height;
@@ -281,6 +293,9 @@ class TrackState:
 
     score: float = 0.0
     holding: bool = False
+    # Consecutive analyzed frames with NO hold-supporting signal. Drives the
+    # holding-latch release (T06/H1); reset to 0 whenever contact is re-seen.
+    no_hold_frames: int = 0
     last_seen: float = field(default_factory=time.time)
     state: BehaviorState = BehaviorState.IDLE
     concealment_frames: int = 0
@@ -524,8 +539,11 @@ class BehaviorScorer:
             reasons.append("Орчноо харах")
             fired.add("looking_around")
 
-        # 2. Item pickup — wrist enters a COCO item bbox → holding=True (persists).
-        if items and not state.holding:
+        # 2. Item pickup — wrist enters a COCO item bbox. The first contact sets
+        # holding=True; while holding, ongoing contact is the signal that keeps
+        # the latch alive (its absence releases it — see step 10).
+        wrist_on_item = False
+        if items:
             for wrist in (l_wrist, r_wrist):
                 if not _kp_valid(wrist):
                     continue
@@ -536,10 +554,12 @@ class BehaviorScorer:
                         matched = it.label
                         break
                 if matched is not None:
-                    state.holding = True
-                    delta += self.weights.get("item_pickup", 0.0)
-                    reasons.append(f"{matched} авах")
-                    fired.add("item_pickup")
+                    wrist_on_item = True
+                    if not state.holding:
+                        state.holding = True
+                        delta += self.weights.get("item_pickup", 0.0)
+                        reasons.append(f"{matched} авах")
+                        fired.add("item_pickup")
                     break
 
         # 3. Body block — shoulder width collapses (turning back to camera).
@@ -660,6 +680,22 @@ class BehaviorScorer:
                 reasons.append("Удаан зогсох")
                 fired.add("loitering")
                 state.loiter_scored = True
+
+        # 10. Hold-latch release (T06/H1) — clear `holding` once the person is no
+        # longer in contact with a held item. A frame "supports" the hold if the
+        # wrist is on an item bbox OR any concealment behavior fired this frame
+        # (the item may be hidden, so concealment counts as still-holding).
+        if state.holding:
+            hold_signal = wrist_on_item or bool(fired & _CONCEALMENT_KEYS)
+            if hold_signal:
+                state.no_hold_frames = 0
+            else:
+                state.no_hold_frames += 1
+                release_after = max(1, int(self._e("hold_release_frames")))
+                if state.no_hold_frames >= release_after:
+                    state.holding = False
+                    state.no_hold_frames = 0
+                    state.concealment_frames = 0
 
         return delta, reasons, fired
 
