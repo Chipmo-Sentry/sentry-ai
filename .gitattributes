@@ -1,0 +1,9 @@
+# Normalize source files to LF in the repo regardless of each dev box's
+# core.autocrlf — keeps ruff-format/CI output identical on Windows and Linux.
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.sh text eol=lf

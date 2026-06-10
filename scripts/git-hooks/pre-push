@@ -1,0 +1,34 @@
+#!/bin/sh
+# Pre-push gate — mirrors the CI "Lint + type-check" steps so an unformatted or
+# type-broken commit never reaches main (CI was red for days because pushes
+# skipped these checks locally).
+#
+# One-time setup per clone:
+#   git config core.hooksPath scripts/git-hooks
+#
+# Bypass (emergencies only):  git push --no-verify
+
+set -e
+
+echo "[pre-push] ruff format --check ."
+uv run ruff format --check . || {
+  echo ""
+  echo "[pre-push] ❌ Unformatted files. Fix with:  uv run ruff format ."
+  exit 1
+}
+
+echo "[pre-push] ruff check ."
+uv run ruff check . || {
+  echo ""
+  echo "[pre-push] ❌ Lint errors. Many auto-fix with:  uv run ruff check --fix ."
+  exit 1
+}
+
+echo "[pre-push] mypy src/sentry_ai"
+uv run mypy src/sentry_ai || {
+  echo ""
+  echo "[pre-push] ❌ Type errors — fix before pushing (CI runs the same check)."
+  exit 1
+}
+
+echo "[pre-push] ✅ all checks passed"
