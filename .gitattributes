@@ -7,3 +7,6 @@
 *.lock text eol=lf
 *.md text eol=lf
 *.sh text eol=lf
+
+# Extension-less git hooks must stay LF or bash on Windows breaks on CRLF.
+scripts/git-hooks/* text eol=lf

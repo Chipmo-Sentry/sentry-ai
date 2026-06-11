@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from typing import Any
 
 import httpx
 
@@ -49,21 +50,49 @@ def _probe(client: httpx.Client, url: str) -> bool:
         return False
 
 
-def _worker_stats(client: httpx.Client) -> tuple[float, int]:
-    """(sum_fps, active_cameras) read from the running app over HTTP, since the
-    heartbeat process has no in-process live-worker manager of its own."""
+def _camera_health(workers: list[dict[str, Any]]) -> list[dict[str, object]]:
+    """Per-camera health rows derived from /v1/live/status workers (audit T12 #3).
+
+    status:
+      - "ok"      — worker thread alive and inferring (FPS > 0)
+      - "stalled" — thread alive but 0 FPS and no recorded error (e.g. YOLO
+                    still warming up, or frames silently stopped flowing)
+      - "error"   — worker thread dead, or 0 FPS with a recorded error
+                    (RTSP read/open failure, init failure, ...)
+    """
+    cams: list[dict[str, object]] = []
+    for w in workers:
+        fps = round(float(w.get("fps_inference") or 0.0), 1)
+        if not w.get("running"):
+            status = "error"
+        elif fps > 0:
+            status = "ok"
+        elif w.get("last_error"):
+            status = "error"
+        else:
+            status = "stalled"
+        cams.append({"camera_id": str(w.get("camera_id") or ""), "fps": fps, "status": status})
+    return cams
+
+
+def _worker_stats(client: httpx.Client) -> tuple[float, int, list[dict[str, object]] | None]:
+    """(sum_fps, active_cameras, per_camera_health) read from the running app
+    over HTTP, since the heartbeat process has no in-process live-worker manager
+    of its own. The sum is kept for backward compat with older backends; the
+    per-camera list is what lets the cloud tell WHICH camera died."""
     try:
         r = client.get(_LOCAL_APP + "/v1/live/status", timeout=3.0)
-        workers = [w for w in r.json().get("workers", []) if w.get("running")]
-        fps = sum(float(w.get("fps_inference") or 0.0) for w in workers)
-        return round(fps, 1), len(workers)
+        workers = list(r.json().get("workers", []))
+        running = [w for w in workers if w.get("running")]
+        fps = sum(float(w.get("fps_inference") or 0.0) for w in running)
+        return round(fps, 1), len(running), _camera_health(workers)
     except Exception:  # noqa: BLE001 — app momentarily unreachable → report 0
-        return 0.0, 0
+        return 0.0, 0, None
 
 
 def _telemetry(client: httpx.Client) -> dict[str, object]:
     settings = get_settings()
-    fps, active = _worker_stats(client)
+    fps, active, cameras = _worker_stats(client)
     from sentry_ai import __version__
 
     # Per-dependency health, probed locally so superadmin can show it without
@@ -80,13 +109,18 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
 
     resources = system_metrics.sample().as_dict()
 
-    return {
+    payload: dict[str, object] = {
         "fps_inference": fps,
         "active_cameras": active,
         "version": __version__,
         "health": health,
         **resources,
     }
+    # Per-camera stream health (audit T12 #3) — omitted entirely when the local
+    # app was unreachable (unknown ≠ "no cameras"). Old backends ignore the key.
+    if cameras is not None:
+        payload["cameras"] = cameras
+    return payload
 
 
 def _beat(client: httpx.Client) -> None:

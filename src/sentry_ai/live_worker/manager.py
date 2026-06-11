@@ -74,7 +74,10 @@ class LiveWorkerManager:
 
     def stop_camera(self, camera_id: str) -> bool:
         with self._lock:
-            worker = self._workers.get(camera_id)
+            # Pop (not just stop) so an intentionally stopped camera disappears
+            # from /v1/live/status instead of lingering as a dead "error" worker
+            # — which would false-alarm the per-camera health watchdog (T12 #3).
+            worker = self._workers.pop(camera_id, None)
             if worker is None:
                 return False
             worker.stop()

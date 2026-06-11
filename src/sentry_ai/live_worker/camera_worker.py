@@ -237,6 +237,9 @@ class CameraWorker:
 
                 ok, frame = cap.read()
                 if not ok or frame is None:
+                    # Recorded so per-camera health (heartbeat `cameras`) reports
+                    # this camera as "error" instead of silently showing 0 FPS.
+                    self._last_error = "RTSP read failed"
                     log.warning("camera.read_failed", camera_id=self.camera_id)
                     cap.release()
                     cap = None
@@ -271,6 +274,8 @@ class CameraWorker:
         # Smaller internal buffer → fresher frames, less latency
         with contextlib.suppress(Exception):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Successful (re)connect clears the sticky error so health recovers.
+        self._last_error = None
         log.info("camera.open_ok", camera_id=self.camera_id)
         return cap
 
