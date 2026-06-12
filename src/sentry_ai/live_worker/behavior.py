@@ -91,7 +91,6 @@ LEVEL_HIGH_MAX = 50.0  # 26-50  HIGH   🔴 ; >50 CRITICAL 🔴
 # the green/yellow PERCENT cutoffs, not raw-score cutoffs.
 DEFAULT_GREEN_MAX = LEVEL_LOW_MAX
 DEFAULT_YELLOW_MAX = LEVEL_MEDIUM_MAX
-DEFAULT_RED_MAX = 100.0
 
 # Temporal smoothing: a noisy single-frame dim must hold this many consecutive
 # analyzed frames before it scores (and then scores once per window thereafter).
@@ -230,30 +229,6 @@ def classify_color(score: float, green_max: float, yellow_max: float) -> RiskCol
     if score <= yellow_max:
         return "yellow"
     return "red"
-
-
-def normalize_pct(
-    raw: float,
-    green_max: float = 5.0,
-    yellow_max: float = 15.0,
-    red_max: float = 30.0,
-) -> float:
-    """Legacy ADR-0022 piecewise-linear normalize (retained for back-compat).
-
-    The v2 engine uses absolute clamping (`clamp_pct`) instead, but this is kept
-    so older callers / tests that import it keep working.
-    """
-    if raw <= 0 or green_max <= 0:
-        return 0.0
-    if raw <= green_max:
-        return 30.0 * raw / green_max
-    if raw <= yellow_max:
-        span = max(yellow_max - green_max, 1e-6)
-        return 30.0 + 40.0 * (raw - green_max) / span
-    if raw <= red_max:
-        span = max(red_max - yellow_max, 1e-6)
-        return 70.0 + 30.0 * (raw - yellow_max) / span
-    return 100.0
 
 
 def clamp_pct(raw: float) -> float:
