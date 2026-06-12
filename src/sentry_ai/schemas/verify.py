@@ -46,7 +46,9 @@ class CutVerifyRequest(BaseModel):
     person_id: int | None = None
     peak_risk_pct: float | None = None
     start_offset_sec: int = -5
-    duration_sec: int = Field(default=15, ge=1, le=60)
+    # Cap covers the dynamic episode window (backend caps at live_clip_max_sec,
+    # default 90): pre-roll back to the episode's first criterion + post-roll.
+    duration_sec: int = Field(default=15, ge=1, le=120)
     provider: str | None = None
     rag_query: str | None = Field(default=None, max_length=2000)
 

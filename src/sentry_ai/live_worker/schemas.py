@@ -30,6 +30,20 @@ class TrackPayload(BaseModel):
     level: RiskLevel = Field(default="LOW")
     state: str = Field(default="IDLE", description="Behavior state machine state")
     sequences: list[str] = Field(default_factory=list, description="Triggered sequence rule keys")
+    # Episode-accumulated criteria (stable keys, first-fired order) + per-key
+    # banked score, and the Mongolian display strings for direct overlay use.
+    behaviors: list[str] = Field(
+        default_factory=list, description="Fired criteria keys this episode, first-fired order"
+    )
+    behavior_scores: dict[str, float] = Field(
+        default_factory=dict, description="Accumulated score contribution per criterion key"
+    )
+    reasons: list[str] = Field(
+        default_factory=list, description="Mongolian display strings (latest non-empty frame)"
+    )
+    episode_started_ms: int | None = Field(
+        default=None, description="Unix ms when this episode's first criterion fired"
+    )
     # Cross-camera re-ID (ADR-0022/0023): store-global person id + their risk
     # accumulated across the store's cameras. None when re-ID is disabled.
     store_person_id: int | None = Field(default=None)

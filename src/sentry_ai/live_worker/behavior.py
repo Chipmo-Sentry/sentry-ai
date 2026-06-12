@@ -260,6 +260,12 @@ class ScoreResult:
     state: BehaviorState
     reasons: list[str]
     sequences: list[str]
+    # Episode-accumulated criteria: stable keys in first-fired order with the
+    # exact score contribution each has banked this episode (incl. sequence
+    # bonuses). Resets with the episode (IDLE reset / stale cleanup).
+    behaviors: list[str] = field(default_factory=list)
+    behavior_scores: dict[str, float] = field(default_factory=dict)
+    episode_started_at: float | None = None
 
 
 @dataclass(slots=True)
@@ -290,6 +296,11 @@ class TrackState:
     loiter_anchor: tuple[float, float] | None = None
     loiter_since: float | None = None
     loiter_scored: bool = False
+    # Episode tracking: when the first criterion of this episode fired, and the
+    # accumulated score contribution per criterion key (insertion order =
+    # first-fired order). Both reset on the IDLE reset in _advance_state.
+    episode_started_at: float | None = None
+    episode_behaviors: dict[str, float] = field(default_factory=dict)
 
 
 class BehaviorScorer:
@@ -418,6 +429,10 @@ class BehaviorScorer:
                 delta, reasons, fired = self._analyze(state, keypoints, person_h, items or [], now)
             state.score += delta
 
+            # First fired criterion since the last reset opens a new episode.
+            if fired and state.episode_started_at is None:
+                state.episode_started_at = now
+
             # Record fired behaviors into the sequence history (chronological).
             for key in fired:
                 state.events.append((key, now))
@@ -444,6 +459,10 @@ class BehaviorScorer:
                 state=state.state,
                 reasons=state.last_reasons,
                 sequences=state.last_sequences,
+                # Copies — ScoreResult escapes the lock; the ledger keeps mutating.
+                behaviors=list(state.episode_behaviors.keys()),
+                behavior_scores=dict(state.episode_behaviors),
+                episode_started_at=state.episode_started_at,
             )
 
     def cleanup_stale(self) -> int:
@@ -502,6 +521,14 @@ class BehaviorScorer:
         reasons: list[str] = []
         fired: set[str] = set()
 
+        def _add(key: str, amount: float, reason: str) -> None:
+            """Bank one criterion firing: score delta + episode ledger + reason."""
+            nonlocal delta
+            delta += amount
+            state.episode_behaviors[key] = state.episode_behaviors.get(key, 0.0) + amount
+            reasons.append(reason)
+            fired.add(key)
+
         # 1. Looking around — face center drifts laterally from shoulder center.
         looking = (
             face_cx is not None
@@ -510,9 +537,7 @@ class BehaviorScorer:
             > person_h * self._dp("looking_around", "offset_frac", 0.15)
         )
         if self._smoothed(state, "looking_around", looking):
-            delta += self.weights.get("looking_around", 0.0)
-            reasons.append("Орчноо харах")
-            fired.add("looking_around")
+            _add("looking_around", self.weights.get("looking_around", 0.0), "Орчноо харах")
 
         # 2. Item pickup — wrist enters a COCO item bbox. The first contact sets
         # holding=True; while holding, ongoing contact is the signal that keeps
@@ -532,9 +557,7 @@ class BehaviorScorer:
                     wrist_on_item = True
                     if not state.holding:
                         state.holding = True
-                        delta += self.weights.get("item_pickup", 0.0)
-                        reasons.append(f"{matched} авах")
-                        fired.add("item_pickup")
+                        _add("item_pickup", self.weights.get("item_pickup", 0.0), f"{matched} авах")
                     break
 
         # 3. Body block — shoulder width collapses (turning back to camera).
@@ -552,9 +575,7 @@ class BehaviorScorer:
                     "body_block", "collapse_frac", 0.55
                 )
         if self._smoothed(state, "body_block", block):
-            delta += self.weights.get("body_block", 0.0)
-            reasons.append("Биеэр далдлах")
-            fired.add("body_block")
+            _add("body_block", self.weights.get("body_block", 0.0), "Биеэр далдлах")
 
         # 4. Crouch — torso vertical extent collapses.
         crouch = False
@@ -562,12 +583,13 @@ class BehaviorScorer:
             crouch = abs(hip_cy - l_shoulder[1]) < person_h * self._dp("crouch", "frac", 0.15)
         if self._smoothed(state, "crouch", crouch):
             if state.holding:
-                delta += max(self.weights.get("crouch", 0.0), self._dp("crouch", "hold_floor", 5.0))
-                reasons.append("Бөхийж бараа нуух")
+                _add(
+                    "crouch",
+                    max(self.weights.get("crouch", 0.0), self._dp("crouch", "hold_floor", 5.0)),
+                    "Бөхийж бараа нуух",
+                )
             else:
-                delta += self.weights.get("crouch", 0.0)
-                reasons.append("Бөхийх")
-            fired.add("crouch")
+                _add("crouch", self.weights.get("crouch", 0.0), "Бөхийх")
 
         # 5. Wrist to torso — wrist held near hip line; only when holding.
         if state.holding and hip_cy is not None:
@@ -582,9 +604,11 @@ class BehaviorScorer:
                 state.concealment_frames += 1
                 cadence = max(1, int(self._dp("wrist_to_torso", "cadence", 8.0)))
                 if state.concealment_frames % cadence == 0:
-                    delta += self.weights.get("wrist_to_torso", 0.0)
-                    reasons.append(f"Хувцас доор нуух ({state.concealment_frames}f)")
-                    fired.add("wrist_to_torso")
+                    _add(
+                        "wrist_to_torso",
+                        self.weights.get("wrist_to_torso", 0.0),
+                        f"Хувцас доор нуух ({state.concealment_frames}f)",
+                    )
             else:
                 state.concealment_frames = max(0, state.concealment_frames - 1)
 
@@ -592,9 +616,7 @@ class BehaviorScorer:
         if state.holding and items:
             bags = [it for it in items if it.label in ("handbag", "backpack", "suitcase")]
             if bags and self._wrist_in_any(l_wrist, r_wrist, [b.box for b in bags]):
-                delta += self.weights.get("bag_interaction", 0.0)
-                reasons.append("Гар уут руу")
-                fired.add("bag_interaction")
+                _add("bag_interaction", self.weights.get("bag_interaction", 0.0), "Гар уут руу")
 
         # 7. Pocket interaction — wrist at a hip keypoint while holding.
         if state.holding:
@@ -614,9 +636,11 @@ class BehaviorScorer:
                         hit = True
                         break
                 if hit:
-                    delta += self.weights.get("pocket_interaction", 0.0)
-                    reasons.append("Халаас руу")
-                    fired.add("pocket_interaction")
+                    _add(
+                        "pocket_interaction",
+                        self.weights.get("pocket_interaction", 0.0),
+                        "Халаас руу",
+                    )
                     break
 
         # 8. Rapid movement — wrist velocity spike; only when holding.
@@ -634,9 +658,7 @@ class BehaviorScorer:
                 rapid = True
             setattr(state, prev_attr, (float(wrist[0]), float(wrist[1])))
         if self._smoothed(state, "rapid_movement", rapid):
-            delta += self.weights.get("rapid_movement", 0.0)
-            reasons.append("Хурдан хөдөлгөөн")
-            fired.add("rapid_movement")
+            _add("rapid_movement", self.weights.get("rapid_movement", 0.0), "Хурдан хөдөлгөөн")
 
         # 9. Loitering — staying in roughly one spot for a long time.
         if shoulder_cx is not None and hip_cy is not None:
@@ -651,9 +673,7 @@ class BehaviorScorer:
                 and not state.loiter_scored
                 and (now - state.loiter_since) >= self.loiter_seconds
             ):
-                delta += self.weights.get("loitering", 0.0)
-                reasons.append("Удаан зогсох")
-                fired.add("loitering")
+                _add("loitering", self.weights.get("loitering", 0.0), "Удаан зогсох")
                 state.loiter_scored = True
 
         # 10. Hold-latch release (T06/H1) — clear `holding` once the person is no
@@ -715,6 +735,10 @@ class BehaviorScorer:
                 state.awarded.add(rule.key)
                 bonus += bonus_val
                 awarded.append(rule.key)
+                # Sequence bonus joins the episode ledger like any criterion.
+                state.episode_behaviors[rule.key] = (
+                    state.episode_behaviors.get(rule.key, 0.0) + bonus_val
+                )
                 if rule.critical:
                     critical = True
         return bonus, awarded, critical
@@ -760,5 +784,7 @@ class BehaviorScorer:
             state.events.clear()
             state.awarded.clear()
             state.concealment_frames = 0
+            state.episode_started_at = None
+            state.episode_behaviors.clear()
 
         state.state = target

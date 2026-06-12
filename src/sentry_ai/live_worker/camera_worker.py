@@ -31,6 +31,11 @@ log = get_logger("sentry_ai.live_worker.camera")
 # Rolling window for FPS smoothing
 _FPS_WINDOW_SEC = 5.0
 
+# How often to emit the per-camera YOLO filter heartbeat log (seconds).
+# Proves the worker is consuming frames, the frame_skip gate is dropping the
+# expected fraction, and YOLO is actually detecting persons.
+_STATS_LOG_SEC = 5.0
+
 # Re-ID quality gate: only skip people too small/far to identify reliably.
 # We deliberately DON'T gate on keypoint visibility — torso cropping already
 # falls back to a body-proportion estimate when shoulders/hips aren't visible,
@@ -74,8 +79,10 @@ class CameraWorker:
         self._thread: threading.Thread | None = None
 
         # Stats
-        self._frames_total = 0
+        self._frames_total = 0  # frames READ off RTSP (pre frame_skip)
+        self._frames_processed = 0  # frames that PASSED frame_skip → YOLO ran
         self._detections_total = 0
+        self._last_stats_log = 0.0  # monotonic ts of last yolo_stats log
         self._capture_times: deque[float] = deque(maxlen=200)  # for fps_capture
         self._inference_times: deque[float] = deque(maxlen=200)  # for fps_inference
         self._last_error: str | None = None
@@ -288,8 +295,29 @@ class CameraWorker:
         h, w = frame_bgr.shape[:2]
         detections = self._yolo.detect_persons(frame_bgr)
         tracked = self._tracker.update(detections)
-        self._inference_times.append(time.monotonic())
+        now = time.monotonic()
+        self._inference_times.append(now)
+        self._frames_processed += 1
         self._detections_total += len(detections)
+
+        # Throttled YOLO-filter heartbeat. captured vs processed ≈ frame_skip
+        # confirms the skip gate; persons>0 when someone is in view confirms the
+        # detector + conf threshold are live. Grep `camera.yolo_stats` in logs.
+        if now - self._last_stats_log >= _STATS_LOG_SEC:
+            self._last_stats_log = now
+            log.info(
+                "camera.yolo_stats",
+                camera_id=self.camera_id,
+                frames_captured=self._frames_total,
+                frames_processed=self._frames_processed,
+                frame_skip=self.frame_skip,
+                persons_this_frame=len(detections),
+                tracks_this_frame=len(tracked),
+                detections_total=self._detections_total,
+                yolo_conf=self.yolo_conf,
+                fps_capture=round(self.fps_capture, 1),
+                fps_inference=round(self.fps_inference, 1),
+            )
 
         # Item detection on every Nth inference cycle (items don't move much).
         self._inference_count += 1
@@ -343,6 +371,14 @@ class CameraWorker:
                     level=result.level,
                     state=result.state.name,
                     sequences=result.sequences,
+                    behaviors=result.behaviors,
+                    behavior_scores={k: round(v, 1) for k, v in result.behavior_scores.items()},
+                    reasons=result.reasons,
+                    episode_started_ms=(
+                        int(result.episode_started_at * 1000)
+                        if result.episode_started_at is not None
+                        else None
+                    ),
                     store_person_id=store_person_id,
                     store_risk_pct=store_risk_pct,
                 ),
@@ -400,6 +436,21 @@ class CameraWorker:
                 2,
                 cv2.LINE_AA,
             )
+            # Active criteria keys under the box (ASCII — cv2 can't render Cyrillic).
+            if p.behaviors:
+                shown = p.behaviors[:3]
+                more = len(p.behaviors) - len(shown)
+                crit_line = ", ".join(shown) + (f" +{more}" if more > 0 else "")
+                cv2.putText(
+                    annotated,
+                    crit_line,
+                    (x1 + 2, min(annotated.shape[0] - 4, y2 + 16)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    bgr,
+                    1,
+                    cv2.LINE_AA,
+                )
 
         # Header overlay: cam + frame # + FPS + det count
         header = (
