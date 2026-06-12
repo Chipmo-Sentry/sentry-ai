@@ -1,6 +1,7 @@
 """Qwen3-VL-4B provider — successor to Qwen2.5-VL (maintenance-only since 2026).
-~92-95% of Qwen2.5-VL-7B accuracy at ~58% of the parameters, ~40-50% less VRAM
-(ADR-0026) — the alt slot to A/B against MiniCPM-V on verified_cases."""
+~92-95% of Qwen2.5-VL-7B accuracy at ~58% of the parameters, ~40-50% less VRAM.
+The DEFAULT provider since ADR-0026 amendment (2026-06-11); minicpm-v-2.6 is the
+rollback/A-B slot."""
 
 import json
 

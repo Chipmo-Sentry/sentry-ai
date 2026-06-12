@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Ollama (host runs the runtime; we just HTTP into it)
     ollama_base_url: str = "http://localhost:11434"
-    default_provider: str = "minicpm-v-2.6"
+    default_provider: str = "qwen3-vl-4b"
     # RAG feedback loop (docs/19 Phase 4): Ollama embedding model for similarity.
     # Empty disables RAG. `ollama pull nomic-embed-text` on the node first.
     embed_model: str = "nomic-embed-text"

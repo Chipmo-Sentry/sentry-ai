@@ -57,7 +57,7 @@ $baseKeys = @{
     'HOST'                 = $cfg.AiHost
     'PORT'                 = "$($cfg.AiPort)"
     'OLLAMA_BASE_URL'      = $OllamaUrl
-    'DEFAULT_PROVIDER'     = 'minicpm-v-2.6'
+    'DEFAULT_PROVIDER'     = 'qwen3-vl-4b'
     'INFERENCE_TIMEOUT_SEC' = '30'
     'SENTRY_BACKEND_URL'   = $BackendUrl
 }
@@ -105,6 +105,6 @@ Write-Host ""
 Write-Host "Chipmo Sentry AI server installed + paired." -ForegroundColor Green
 Write-Host "  It should now appear under 'AI servers' in the superadmin dashboard." -ForegroundColor Green
 Write-Host "  Manage:  $($cfg.AppRoot)\scripts\server-control.ps1 status|health|logs" -ForegroundColor Green
-Write-Host "  Ensure Ollama is running:  ollama serve   (ollama pull minicpm-v:8b)" -ForegroundColor Yellow
+Write-Host "  Ensure Ollama is running:  ollama serve   (ollama pull qwen3-vl:4b-instruct)" -ForegroundColor Yellow
 Write-Host ""
 Read-Host "Press Enter to close"

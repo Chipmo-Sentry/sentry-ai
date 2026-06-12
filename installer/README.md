@@ -11,7 +11,7 @@ hosted backend. One installer sets up three Windows services:
 | `ChipmoSentryAi-tunnel` | cloudflared (optional — exposes ingest + ai to Railway) |
 
 **Ollama is NOT installed** by this — install it yourself
-(https://ollama.com/download, then `ollama pull minicpm-v:8b`). The installer
+(https://ollama.com/download, then `ollama pull qwen3-vl:4b-instruct`). The installer
 just points sentry-ai at it via the Ollama URL you provide.
 
 ## Get the installer

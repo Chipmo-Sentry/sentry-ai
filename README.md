@@ -6,8 +6,8 @@ The AI brain of **Chipmo Sentry**. One FastAPI service with two jobs:
    person, scores behaviour on a **0–100 risk scale** with a state-machine engine, and streams overlay
    metadata to the backend in real time.
 2. **VLM verification** — when a person breaches a camera's risk threshold (or a clip is uploaded), cuts
-   a short clip, extracts keyframes, and asks a self-hosted **Vision-Language Model** (MiniCPM-V 2.6 or
-   Qwen3-VL-4B via Ollama) to classify the event and explain it **in Mongolian**.
+   a short clip, extracts keyframes, and asks a self-hosted **Vision-Language Model** (Qwen3-VL-4B or
+   MiniCPM-V 2.6 via Ollama) to classify the event and explain it **in Mongolian**.
 
 Python 3.11 · FastAPI · Ollama · YOLO26 (ultralytics) · supervision (ByteTrack) · OpenCV · ffmpeg · Apache-2.0
 
@@ -21,8 +21,8 @@ Python 3.11 · FastAPI · Ollama · YOLO26 (ultralytics) · supervision (ByteTra
 
 | Role | Model | Notes |
 |---|---|---|
-| **VLM** (default) | MiniCPM-V 2.6 — Ollama tag `minicpm-v:8b` (Q4) | provider name `minicpm-v-2.6` |
-| **VLM** (alt) | Qwen3-VL-4B — Ollama tag `qwen3-vl:4b-instruct` | provider name `qwen3-vl-4b` (ADR-0026); A/B-switchable per node. `qwen2.5-vl-7b` deprecated, kept for rollback |
+| **VLM** (default) | Qwen3-VL-4B — Ollama tag `qwen3-vl:4b-instruct` | provider name `qwen3-vl-4b` (ADR-0026); A/B-switchable per node |
+| **VLM** (alt) | MiniCPM-V 2.6 — Ollama tag `minicpm-v:8b` (Q4) | provider name `minicpm-v-2.6` (rollback slot). `qwen2.5-vl-7b` deprecated, kept for rollback |
 | **Pose** | `yolo26s-pose.pt` (default) / `yolo26n-pose.pt` (CPU-fast) | COCO-17 keypoints per person (ADR-0026; `yolo11*` = rollback) |
 | **Items** | `yolo26n.pt` | retail-shrink classes: backpack, handbag, bottle, … |
 | **Re-ID** | HistogramEmbedder (default) / OSNet (`torchreid`, optional) | cross-camera person identity |
