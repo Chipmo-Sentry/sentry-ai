@@ -47,6 +47,15 @@ _MIN_KP_CONF = 0.3
 # lighting changes, so it is down-weighted in the histogram embedding.
 _SAT_WEIGHT = 0.5
 
+# Cross-camera score decay (half-life, seconds). The store score accumulates only
+# positive per-frame increments, so WITHOUT decay it is a lifetime ratchet: anyone
+# present long enough — even just looking around occasionally — climbs to and pins
+# at 100, making store_risk_pct meaningless (all green boxes show "100%"). Decaying
+# it toward 0 makes it reflect RECENT cross-camera suspicion: it halves every
+# STORE_SCORE_HALFLIFE_SEC with no new evidence, so calm fades but sustained
+# suspicious activity stays high.
+STORE_SCORE_HALFLIFE_SEC = 90.0
+
 
 def _torso_box(box: Box, keypoints: NDArray[np.float32] | None) -> Box:
     """Return the torso region (shoulder→hip) for a person box.
@@ -225,6 +234,9 @@ class StorePerson:
     embedding: NDArray[np.float32]
     gallery: list[NDArray[np.float32]] = field(default_factory=list)
     score: float = 0.0
+    # Separate from last_seen: match_or_create() refreshes last_seen every frame,
+    # so decay must time off its OWN clock (last score mutation), not last_seen.
+    score_ts: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     last_camera: str = ""  # most-recent camera (drives spatial-temporal gating)
     cameras: set[str] = field(default_factory=set)
@@ -259,11 +271,14 @@ class StorePersonRegistry:
         gallery_size: int = 8,
         coexist_sec: float = 1.0,
         same_cam_threshold: float = 0.45,
+        score_halflife_sec: float = STORE_SCORE_HALFLIFE_SEC,
     ) -> None:
         self.match_threshold = match_threshold
         self.window_sec = window_sec
         self.ema = ema
         self.gallery_size = max(1, gallery_size)
+        # Half-life for the cross-camera score decay (0 → disable, pure ratchet).
+        self.score_halflife_sec = max(0.0, score_halflife_sec)
         # Spatial-temporal params.
         self.coexist_sec = coexist_sec  # active-elsewhere window → mutual exclusion
         self.same_cam_threshold = same_cam_threshold  # lenient re-entry threshold
@@ -333,13 +348,24 @@ class StorePersonRegistry:
             return pid
 
     def add_score(self, person_id: int, delta: float, now: float | None = None) -> float:
-        """Add to a person's accumulated cross-camera score; return the new total."""
+        """Add to a person's cross-camera score (time-decayed), return the new total.
+
+        The score halves every ``score_halflife_sec`` of elapsed wall-time before
+        the new increment is added, so it tracks RECENT suspicion instead of
+        ratcheting to 100 over a person's whole visit. ``score_halflife_sec=0``
+        disables decay (legacy pure-accumulate).
+        """
         ts = time.time() if now is None else now
         with self._lock:
             p = self._people.get(person_id)
             if p is None:
                 return 0.0
+            if self.score_halflife_sec > 0.0 and p.score > 0.0:
+                elapsed = max(0.0, ts - p.score_ts)
+                if elapsed > 0.0:
+                    p.score *= 0.5 ** (elapsed / self.score_halflife_sec)
             p.score += delta
+            p.score_ts = ts
             p.last_seen = ts
             return p.score
 

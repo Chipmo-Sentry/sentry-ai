@@ -86,7 +86,9 @@ def test_registry_separates_distinct_people() -> None:
 
 
 def test_registry_accumulates_score_across_cameras() -> None:
-    reg = StorePersonRegistry(match_threshold=0.6)
+    # Decay disabled (score_halflife_sec=0) so this tests pure cross-camera
+    # accumulation without the time-decay confounding the exact total.
+    reg = StorePersonRegistry(match_threshold=0.6, score_halflife_sec=0.0)
     emb = HistogramEmbedder(bins=8)
     v = emb.embed(_solid((10, 200, 30)), (0, 0, 20, 40))
     assert v is not None
@@ -96,6 +98,23 @@ def test_registry_accumulates_score_across_cameras() -> None:
     reg.match_or_create(v, "camB", now=1001.0)
     total = reg.add_score(pid, 15.0, now=1001.0)
     assert total == 35.0
+
+
+def test_registry_score_decays_over_time() -> None:
+    """The cross-camera score halves each half-life with no new evidence, so it
+    can't ratchet to a permanent 100 (the all-green-boxes-show-100% bug)."""
+    reg = StorePersonRegistry(match_threshold=0.6, score_halflife_sec=10.0)
+    emb = HistogramEmbedder(bins=8)
+    v = emb.embed(_solid((10, 200, 30)), (0, 0, 20, 40))
+    assert v is not None
+    pid = reg.match_or_create(v, "camA", now=0.0)
+    reg.add_score(pid, 100.0, now=0.0)  # score = 100 at t=0
+    # One half-life later, no new evidence → ~50.
+    total = reg.add_score(pid, 0.0, now=10.0)
+    assert 49.0 < total < 51.0
+    # Two half-lives → ~25. The old suspicion fades instead of pinning at 100.
+    total2 = reg.add_score(pid, 0.0, now=20.0)
+    assert 24.0 < total2 < 26.0
 
 
 # === Spatial-temporal gating ===
