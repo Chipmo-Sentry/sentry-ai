@@ -13,6 +13,7 @@ def _get_client() -> OllamaClient:
         _client = OllamaClient(
             base_url=settings.ollama_base_url,
             timeout_sec=settings.inference_timeout_sec,
+            num_ctx=settings.vlm_num_ctx,
         )
     return _client
 

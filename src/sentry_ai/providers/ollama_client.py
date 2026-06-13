@@ -12,8 +12,11 @@ import httpx
 
 
 class OllamaClient:
-    def __init__(self, base_url: str, timeout_sec: int):
+    def __init__(self, base_url: str, timeout_sec: int, num_ctx: int = 0):
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout_sec)
+        # >0 → sent as options.num_ctx to cap the KV cache so the VLM fits on the
+        # GPU (see settings.vlm_num_ctx). 0 → omit, use Ollama's per-model default.
+        self._num_ctx = num_ctx
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -41,6 +44,9 @@ class OllamaClient:
         if format_json:
             # Tells Ollama to constrain the output to valid JSON
             payload["format"] = "json"
+        if self._num_ctx > 0:
+            # Cap the context so the KV cache stays small enough for full-GPU offload.
+            payload["options"] = {"num_ctx": self._num_ctx}
 
         resp = await self._client.post("/api/chat", json=payload)
         resp.raise_for_status()

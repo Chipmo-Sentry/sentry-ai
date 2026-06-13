@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     embed_model: str = "nomic-embed-text"
     inference_timeout_sec: int = 30
     retry_on_parse_error: int = 2
+    # VLM context window (tokens) sent as Ollama `options.num_ctx`. Ollama otherwise
+    # defaults to the model's max trained context (Qwen3-VL = 262144), whose KV cache
+    # + compute buffers blow past 8 GB VRAM → only a few layers offload to GPU and the
+    # rest fall back to CPU (verify becomes minutes-slow). We send ~5 small frames
+    # (frame_max_dim 640) + a short prompt and expect short JSON. Measured on an
+    # 8 GB RTX 4060 co-resident with the live YOLO workers: 8192 → 100% GPU offload
+    # (~7 s verify); 16384 → 83% GPU (spills to CPU). 0 = don't send (Ollama default).
+    vlm_num_ctx: int = 8192
 
     # Frame extraction (Stage 2 input)
     frames_per_clip: int = 5
