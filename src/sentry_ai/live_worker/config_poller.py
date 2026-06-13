@@ -107,10 +107,13 @@ class BehaviorConfigPoller:
                 break
 
     def _fetch_node_provider(self, settings: Any) -> None:
-        """Poll /api/v1/ai-nodes/config for the centrally-chosen VLM provider and
-        publish it to runtime_config so the verify path hot-applies it. Best-effort,
-        paired nodes only; failures are logged and never raised."""
-        from sentry_ai.runtime_config import set_central_provider
+        """Poll /api/v1/ai-nodes/config for the centrally-chosen VLM provider,
+        publish it to runtime_config so the verify path hot-applies it, then
+        readiness-check the effective provider so the dashboard can show whether
+        the server actually applied it. Best-effort, paired nodes only; failures
+        are logged and never raised."""
+        from sentry_ai.providers.factory import resolve_provider_name
+        from sentry_ai.runtime_config import set_central_provider, set_provider_health
 
         if not settings.ai_node_id:
             return
@@ -126,6 +129,10 @@ class BehaviorConfigPoller:
             return
         if isinstance(provider, str) and provider:
             set_central_provider(provider)
+        # Readiness: which provider will verify actually use, and is its model up?
+        effective = resolve_provider_name(None)
+        ready, error = _check_provider_ready(effective, settings)
+        set_provider_health(effective, ready, error)
 
     def _fetch_and_dispatch(self, url: str) -> None:
         with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:
@@ -199,6 +206,36 @@ class BehaviorConfigPoller:
                 yellow_max=yellow_max,
                 high_max=high_max,
             )
+
+
+def _check_provider_ready(effective: str, settings: Any) -> tuple[bool, str | None]:
+    """Confirm the effective provider's backing model is actually reachable, so the
+    dashboard surfaces a real error (e.g. model not pulled) instead of failing only
+    at the next breach. Returns (ready, error_message_mn). Never raises."""
+    from sentry_ai.providers.factory import get_provider_class
+
+    cls = get_provider_class(effective)
+    if cls is None:
+        return False, f"Тодорхойгүй provider: {effective}"
+    runtime = getattr(cls, "runtime", "ollama")
+    try:
+        if runtime == "vllm":
+            base = settings.vllm_base_url.rstrip("/")
+            with httpx.Client(timeout=4.0) as c:
+                c.get(base + "/models").raise_for_status()
+            return True, None
+        # Ollama-backed: the model tag must be pulled on this node.
+        tag = getattr(cls, "model_tag", "")
+        with httpx.Client(timeout=4.0) as c:
+            r = c.get(settings.ollama_base_url.rstrip("/") + "/api/tags")
+            r.raise_for_status()
+            names = {m.get("name", "") for m in r.json().get("models", [])}
+        if tag and tag not in names:
+            return False, f"Ollama-д '{tag}' татагдаагүй — `ollama pull {tag}`"
+    except httpx.HTTPError:
+        where = "vLLM сервер" if runtime == "vllm" else "Ollama"
+        return False, f"{where} холбогдсонгүй"
+    return True, None
 
 
 _poller: BehaviorConfigPoller | None = None

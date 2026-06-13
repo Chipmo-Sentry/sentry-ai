@@ -15,9 +15,10 @@ class Qwen3VLProvider:
     """Implements `VLMProvider`. Tag in Ollama: `qwen3-vl:4b-instruct`."""
 
     name = "qwen3-vl-4b"
+    runtime = "ollama"
     # Explicit -instruct: the bare :4b tag may resolve to the "thinking" variant,
     # whose chain-of-thought preamble breaks format_json parsing.
-    _model_tag = "qwen3-vl:4b-instruct"
+    model_tag = "qwen3-vl:4b-instruct"
 
     def __init__(self, ollama: OllamaClient):
         self._ollama = ollama
@@ -30,7 +31,7 @@ class Qwen3VLProvider:
     ) -> VLMOutput:
         del timeout_sec  # uses OllamaClient's configured timeout
         raw = await self._ollama.chat_with_images(
-            model=self._model_tag,
+            model=self.model_tag,
             prompt=prompt,
             images=frames,
             format_json=True,

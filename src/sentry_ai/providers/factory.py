@@ -19,6 +19,11 @@ def list_provider_names() -> list[str]:
     return list(_REGISTRY.keys())
 
 
+def get_provider_class(name: str) -> type | None:
+    """The provider class (for static attrs like `runtime`/`model_tag`), or None."""
+    return _REGISTRY.get(name)
+
+
 def resolve_provider_name(requested: str | None) -> str:
     """Pick the effective VLM provider (central control, ADR-0026).
 

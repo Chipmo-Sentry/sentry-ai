@@ -61,6 +61,17 @@ def emitter_stats() -> dict[str, int]:
     return get_manager().emitter_stats
 
 
+@router.get("/provider")
+def provider_status() -> dict[str, object]:
+    """Effective VLM provider this node will actually use + readiness, so the
+    heartbeat (and thus the dashboard) can show whether a central provider change
+    was really applied on the server. Set by the config poller."""
+    from sentry_ai.runtime_config import get_provider_health
+
+    h = get_provider_health()
+    return {"effective": h.effective, "ready": h.ready, "error": h.error}
+
+
 @router.get(
     "/snapshot/{camera_id}",
     responses={200: {"content": {"image/jpeg": {}}}, 404: {}},

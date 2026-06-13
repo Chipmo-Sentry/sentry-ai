@@ -90,6 +90,19 @@ def _worker_stats(client: httpx.Client) -> tuple[float, int, list[dict[str, obje
         return 0.0, 0, None
 
 
+def _provider_status(client: httpx.Client) -> dict[str, object] | None:
+    """Effective VLM provider + readiness read from the running app (central-control
+    feedback). None if the app is momentarily unreachable. Reported so the dashboard
+    can show 'applied on server' vs 'applying…' vs an error next to the provider."""
+    try:
+        r = client.get(_LOCAL_APP + "/v1/live/provider", timeout=3.0)
+        if r.status_code != 200:
+            return None
+        return dict(r.json())
+    except Exception:  # noqa: BLE001 — app momentarily unreachable
+        return None
+
+
 def _telemetry(client: httpx.Client) -> dict[str, object]:
     settings = get_settings()
     fps, active, cameras = _worker_stats(client)
@@ -120,6 +133,14 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
     # app was unreachable (unknown ≠ "no cameras"). Old backends ignore the key.
     if cameras is not None:
         payload["cameras"] = cameras
+    # Effective VLM provider + readiness (central-control feedback). The effective
+    # provider is what verify actually uses; the dashboard compares it to the
+    # desired (node.provider) to show applied/applying, and surfaces errors.
+    prov = _provider_status(client)
+    if prov is not None:
+        payload["provider_effective"] = prov.get("effective")
+        payload["provider_ready"] = prov.get("ready")
+        payload["provider_error"] = prov.get("error")
     return payload
 
 

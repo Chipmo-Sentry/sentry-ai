@@ -13,7 +13,8 @@ class QwenVLProvider:
     """Implements `VLMProvider`. Tag in Ollama: `qwen2.5vl:7b`."""
 
     name = "qwen2.5-vl-7b"
-    _model_tag = "qwen2.5vl:7b"
+    runtime = "ollama"
+    model_tag = "qwen2.5vl:7b"
 
     def __init__(self, ollama: OllamaClient):
         self._ollama = ollama
@@ -26,7 +27,7 @@ class QwenVLProvider:
     ) -> VLMOutput:
         del timeout_sec  # uses OllamaClient's configured timeout
         raw = await self._ollama.chat_with_images(
-            model=self._model_tag,
+            model=self.model_tag,
             prompt=prompt,
             images=frames,
             format_json=True,

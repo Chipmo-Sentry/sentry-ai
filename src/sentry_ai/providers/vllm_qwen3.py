@@ -27,6 +27,7 @@ class Qwen3VLvLLMProvider:
     """Implements `VLMProvider`. Talks to a vLLM OpenAI-compatible endpoint."""
 
     name = "qwen3-vl-vllm"
+    runtime = "vllm"
 
     def __init__(self, ollama: OllamaClient) -> None:
         # The factory hands every provider the shared OllamaClient; vLLM doesn't use

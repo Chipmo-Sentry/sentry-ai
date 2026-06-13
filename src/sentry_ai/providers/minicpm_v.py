@@ -13,7 +13,8 @@ class MiniCPMVProvider:
     """Implements `VLMProvider`. Tag in Ollama: `minicpm-v:8b`."""
 
     name = "minicpm-v-2.6"
-    _model_tag = "minicpm-v:8b"
+    runtime = "ollama"
+    model_tag = "minicpm-v:8b"
 
     def __init__(self, ollama: OllamaClient):
         self._ollama = ollama
@@ -27,7 +28,7 @@ class MiniCPMVProvider:
         # timeout_sec is enforced by the httpx client constructed in OllamaClient
         del timeout_sec  # MiniCPM uses the client's default; OK for M1
         raw = await self._ollama.chat_with_images(
-            model=self._model_tag,
+            model=self.model_tag,
             prompt=prompt,
             images=frames,
             format_json=True,
