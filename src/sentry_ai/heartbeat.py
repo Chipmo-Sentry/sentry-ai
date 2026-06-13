@@ -113,10 +113,6 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
         "fps_inference": fps,
         "active_cameras": active,
         "version": __version__,
-        # Effective VLM provider this node actually runs (settings.default_provider,
-        # i.e. the .env value used by the verify path). Reported so the superadmin
-        # dashboard reflects reality instead of a stale central default.
-        "provider": settings.default_provider,
         "health": health,
         **resources,
     }

@@ -100,8 +100,32 @@ class BehaviorConfigPoller:
                 # Don't spam — log every failed poll at warning only
                 log.warning("config_poller.fetch_failed", error=str(e), retry_in=delay)
                 delay = min(delay * 2, POLL_INTERVAL_SEC)
+            # Central VLM provider (ADR-0026 central control). Independent of the
+            # behavior poll above so a node-config failure never stalls behavior.
+            self._fetch_node_provider(settings)
             if self._stop.wait(timeout=delay):
                 break
+
+    def _fetch_node_provider(self, settings: Any) -> None:
+        """Poll /api/v1/ai-nodes/config for the centrally-chosen VLM provider and
+        publish it to runtime_config so the verify path hot-applies it. Best-effort,
+        paired nodes only; failures are logged and never raised."""
+        from sentry_ai.runtime_config import set_central_provider
+
+        if not settings.ai_node_id:
+            return
+        url = settings.sentry_backend_url.rstrip("/") + "/api/v1/ai-nodes/config"
+        headers = {"Authorization": f"Bearer {settings.sentry_backend_service_token}"}
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:
+                r = client.get(url, headers=headers)
+                r.raise_for_status()
+                provider = r.json().get("provider")
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("config_poller.node_config_failed", error=str(e))
+            return
+        if isinstance(provider, str) and provider:
+            set_central_provider(provider)
 
     def _fetch_and_dispatch(self, url: str) -> None:
         with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:

@@ -19,6 +19,25 @@ def list_provider_names() -> list[str]:
     return list(_REGISTRY.keys())
 
 
+def resolve_provider_name(requested: str | None) -> str:
+    """Pick the effective VLM provider (central control, ADR-0026).
+
+    Priority: explicit per-request `requested` > central value pushed from the
+    backend (superadmin dropdown, polled by config_poller) > settings.default_provider
+    (.env bootstrap). The central value is ignored unless it's a known provider,
+    so a stale/typo'd dashboard value can never break verify.
+    """
+    if requested:
+        return requested
+    from sentry_ai.runtime_config import get_central_provider
+    from sentry_ai.settings import get_settings
+
+    central = get_central_provider()
+    if central and central in _REGISTRY:
+        return central
+    return get_settings().default_provider
+
+
 def get_provider(name: str, ollama: OllamaClient) -> VLMProvider:
     cls = _REGISTRY.get(name)
     if cls is None:

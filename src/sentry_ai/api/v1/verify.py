@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sentry_ai.auth import require_service_token
 from sentry_ai.dependencies import OllamaClientDep
 from sentry_ai.pipeline.verifier import verify_clip
-from sentry_ai.providers.factory import get_provider
+from sentry_ai.providers.factory import get_provider, resolve_provider_name
 from sentry_ai.schemas.verify import (
     CutVerifyRequest,
     CutVerifyResponse,
@@ -44,8 +44,7 @@ async def verify(
     body: VerifyRequest,
     ollama: Annotated["OllamaClientDep", Depends(OllamaClientDep)],
 ) -> VerifyResponse:
-    settings = get_settings()
-    provider_name = body.provider or settings.default_provider
+    provider_name = resolve_provider_name(body.provider)
 
     try:
         provider = get_provider(provider_name, ollama.client)
@@ -108,8 +107,7 @@ async def cut_verify(
 
     from sentry_ai import clip_cutter, rag
 
-    settings = get_settings()
-    provider_name = body.provider or settings.default_provider
+    provider_name = resolve_provider_name(body.provider)
     try:
         provider = get_provider(provider_name, ollama.client)
     except KeyError as e:
