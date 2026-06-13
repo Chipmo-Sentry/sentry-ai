@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     embed_model: str = "nomic-embed-text"
     inference_timeout_sec: int = 30
     retry_on_parse_error: int = 2
+    # vLLM provider (ADR-0026 scale-path). The `qwen3-vl-vllm` provider talks to a
+    # vLLM OpenAI-compatible server (`vllm serve Qwen/Qwen3-VL-4B-Instruct`,
+    # vllm>=0.11.0) — the runtime for the future dedicated Linux GPU VPS, NOT this
+    # Windows laptop node (vLLM needs Linux + a dedicated GPU). Context/VRAM fit is
+    # configured server-side there via --max-model-len, so no num_ctx is sent here.
+    vllm_base_url: str = "http://localhost:8000/v1"  # OpenAI-compatible base (remote)
+    vllm_model: str = "Qwen/Qwen3-VL-4B-Instruct"  # served model id on the vLLM host
+
     # VLM context window (tokens) sent as Ollama `options.num_ctx`. Ollama otherwise
     # defaults to the model's max trained context (Qwen3-VL = 262144), whose KV cache
     # + compute buffers blow past 8 GB VRAM → only a few layers offload to GPU and the

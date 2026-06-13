@@ -5,10 +5,12 @@ from sentry_ai.providers.minicpm_v import MiniCPMVProvider
 from sentry_ai.providers.ollama_client import OllamaClient
 from sentry_ai.providers.qwen3_vl import Qwen3VLProvider
 from sentry_ai.providers.qwen_vl import QwenVLProvider
+from sentry_ai.providers.vllm_qwen3 import Qwen3VLvLLMProvider
 
 _REGISTRY: dict[str, type] = {
-    "minicpm-v-2.6": MiniCPMVProvider,
-    "qwen3-vl-4b": Qwen3VLProvider,  # alt slot (ADR-0026)
+    "qwen3-vl-4b": Qwen3VLProvider,  # DEFAULT — Ollama (ADR-0026 amendment)
+    "minicpm-v-2.6": MiniCPMVProvider,  # alt/rollback — Ollama
+    "qwen3-vl-vllm": Qwen3VLvLLMProvider,  # scale-path — vLLM on dedicated Linux GPU
     "qwen2.5-vl-7b": QwenVLProvider,  # deprecated — kept for rollback (ADR-0026)
 }
 
