@@ -33,6 +33,7 @@ import math
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Literal
@@ -265,6 +266,8 @@ class ScoreResult:
     # bonuses). Resets with the episode (IDLE reset / stale cleanup).
     behaviors: list[str] = field(default_factory=list)
     behavior_scores: dict[str, float] = field(default_factory=dict)
+    # Per-criterion seconds-from-episode-start (first firing), for the timeline.
+    behavior_offsets: dict[str, float] = field(default_factory=dict)
     episode_started_at: float | None = None
 
 
@@ -301,6 +304,9 @@ class TrackState:
     # first-fired order). Both reset on the IDLE reset in _advance_state.
     episode_started_at: float | None = None
     episode_behaviors: dict[str, float] = field(default_factory=dict)
+    # First-fired wall-clock ts per criterion key this episode → drives the
+    # per-criterion "X seconds in" offset on the alert timeline. Same reset.
+    episode_behavior_ts: dict[str, float] = field(default_factory=dict)
 
 
 class BehaviorScorer:
@@ -310,7 +316,16 @@ class BehaviorScorer:
     items)` advances the score and returns a `ScoreResult`.
     """
 
-    def __init__(self, weights: dict[str, float] | None = None) -> None:
+    def __init__(
+        self,
+        weights: dict[str, float] | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        # Injectable wall-clock source. Production uses time.time; tests pass a
+        # controllable clock so episode/loiter/sequence timing is deterministic
+        # and not at the mercy of how fast frames are processed under load.
+        self._clock = clock
         self.weights = dict(DEFAULT_WEIGHTS)
         if weights:
             self.weights.update(weights)
@@ -415,7 +430,7 @@ class BehaviorScorer:
                 state = TrackState()
                 self._states[tracker_id] = state
 
-            now = time.time()
+            now = self._clock()
             state.last_seen = now
 
             # Decay before adding new evidence.
@@ -451,6 +466,18 @@ class BehaviorScorer:
             pct = clamp_pct(state.score)
             self._advance_state(state, fired, pct, seq_critical)
 
+            # Seconds from episode start for each fired criterion (0.0 before the
+            # episode opens, which only happens with an empty ledger anyway).
+            ep_start = state.episode_started_at
+            offsets = (
+                {
+                    k: round(max(0.0, ts - ep_start), 1)
+                    for k, ts in state.episode_behavior_ts.items()
+                }
+                if ep_start is not None
+                else {}
+            )
+
             return ScoreResult(
                 raw_score=state.score,
                 risk_pct=pct,
@@ -462,12 +489,13 @@ class BehaviorScorer:
                 # Copies — ScoreResult escapes the lock; the ledger keeps mutating.
                 behaviors=list(state.episode_behaviors.keys()),
                 behavior_scores=dict(state.episode_behaviors),
+                behavior_offsets=offsets,
                 episode_started_at=state.episode_started_at,
             )
 
     def cleanup_stale(self) -> int:
         """Drop tracker states unseen for STALE_TRACK_SEC. Returns count removed."""
-        now = time.time()
+        now = self._clock()
         with self._lock:
             stale_sec = self._e("stale_track_sec")
             stale = [tid for tid, s in self._states.items() if now - s.last_seen > stale_sec]
@@ -526,6 +554,7 @@ class BehaviorScorer:
             nonlocal delta
             delta += amount
             state.episode_behaviors[key] = state.episode_behaviors.get(key, 0.0) + amount
+            state.episode_behavior_ts.setdefault(key, now)  # first firing wins
             reasons.append(reason)
             fired.add(key)
 
@@ -739,6 +768,7 @@ class BehaviorScorer:
                 state.episode_behaviors[rule.key] = (
                     state.episode_behaviors.get(rule.key, 0.0) + bonus_val
                 )
+                state.episode_behavior_ts.setdefault(rule.key, now)
                 if rule.critical:
                     critical = True
         return bonus, awarded, critical
@@ -778,13 +808,19 @@ class BehaviorScorer:
             target = BehaviorState.ALERT
 
         # Reset when the person has clearly calmed down — lets a fresh episode
-        # re-trigger sequence bonuses later.
-        if pct <= self.green_max and not state.holding and not fired:
+        # re-trigger sequence bonuses later. A behavior whose temporal-smoothing
+        # streak is still building counts as ongoing even on the frames between
+        # its once-per-window emissions: don't close the episode out from under
+        # an active behavior (that would fragment one continuous episode into a
+        # fresh one every SMOOTH_FRAMES window).
+        streak_active = any(n > 0 for n in state.streak.values())
+        if pct <= self.green_max and not state.holding and not fired and not streak_active:
             target = BehaviorState.IDLE
             state.events.clear()
             state.awarded.clear()
             state.concealment_frames = 0
             state.episode_started_at = None
             state.episode_behaviors.clear()
+            state.episode_behavior_ts.clear()
 
         state.state = target

@@ -373,6 +373,7 @@ class CameraWorker:
                     sequences=result.sequences,
                     behaviors=result.behaviors,
                     behavior_scores={k: round(v, 1) for k, v in result.behavior_scores.items()},
+                    behavior_offsets=result.behavior_offsets,
                     reasons=result.reasons,
                     episode_started_ms=(
                         int(result.episode_started_at * 1000)

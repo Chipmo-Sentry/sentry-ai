@@ -38,6 +38,10 @@ class TrackPayload(BaseModel):
     behavior_scores: dict[str, float] = Field(
         default_factory=dict, description="Accumulated score contribution per criterion key"
     )
+    behavior_offsets: dict[str, float] = Field(
+        default_factory=dict,
+        description="Seconds from episode start to each criterion's first firing",
+    )
     reasons: list[str] = Field(
         default_factory=list, description="Mongolian display strings (latest non-empty frame)"
     )

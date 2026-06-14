@@ -26,6 +26,28 @@ L_HIP, R_HIP = 11, 12
 PERSON_H = 200.0
 
 
+class FakeClock:
+    """Deterministic, manually-advanced wall clock. Frames stay at a fixed
+    instant unless a test explicitly advances it — so loiter/sequence/episode
+    timing never depends on how fast the suite runs (the source of the flake)."""
+
+    def __init__(self, start: float = 1_781_334_799.64) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def _scorer() -> BehaviorScorer:
+    """A scorer whose clock is frozen — wall-clock elapsed time between frames
+    is always zero, so loitering and sequence-window expiry can't fire on the
+    intermediate (non-firing) frames and trip the IDLE reset."""
+    return BehaviorScorer(clock=FakeClock())
+
+
 def _kp3() -> np.ndarray:
     return np.zeros((17, 3), dtype=np.float32)
 
@@ -68,7 +90,7 @@ def _fire_looking(scorer: BehaviorScorer, tid: int = 1):
 
 
 def test_no_episode_before_any_criterion_fires() -> None:
-    scorer = BehaviorScorer()
+    scorer = _scorer()
     r = scorer.score(1, _neutral(), PERSON_H)
     assert r.episode_started_at is None
     assert r.behaviors == []
@@ -76,7 +98,7 @@ def test_no_episode_before_any_criterion_fires() -> None:
 
 
 def test_episode_starts_on_first_fired_criterion() -> None:
-    scorer = BehaviorScorer()
+    scorer = _scorer()
     r = _fire_looking(scorer)
     assert r.episode_started_at is not None
     assert r.behaviors == ["looking_around"]
@@ -84,17 +106,23 @@ def test_episode_starts_on_first_fired_criterion() -> None:
 
 
 def test_episode_start_is_stable_across_later_firings() -> None:
-    scorer = BehaviorScorer()
+    clock = FakeClock()
+    scorer = BehaviorScorer(clock=clock)
     first = _fire_looking(scorer)
+    # Advance the clock well within the loiter window (30s) before re-firing.
+    # If the episode wrongly reset+reopened, episode_started_at would be re-
+    # stamped to this LATER instant; a stable episode keeps the original.
+    clock.advance(1.0)
     later = _fire_looking(scorer)  # fires again after another smoothing window
     assert later.episode_started_at == first.episode_started_at
+    assert later.episode_started_at < clock.t  # carried over, not re-stamped
 
 
 # === ledger accumulation ===
 
 
 def test_ledger_orders_keys_by_first_fired_and_accumulates() -> None:
-    scorer = BehaviorScorer()
+    scorer = _scorer()
     _fire_looking(scorer)
     _pick_up(scorer)
     r = scorer.score(1, _neutral(), PERSON_H)
@@ -109,7 +137,7 @@ def test_ledger_orders_keys_by_first_fired_and_accumulates() -> None:
 
 
 def test_sequence_bonus_lands_in_ledger() -> None:
-    scorer = BehaviorScorer()
+    scorer = _scorer()
     _fire_looking(scorer)
     _pick_up(scorer)
     r = scorer.score(1, _neutral(), PERSON_H)
@@ -120,7 +148,7 @@ def test_sequence_bonus_lands_in_ledger() -> None:
 def test_crouch_while_holding_banks_hold_floor() -> None:
     """The ledger must record the ACTUAL banked amount (hold_floor for crouch
     while holding), not the nominal catalog weight."""
-    scorer = BehaviorScorer()
+    scorer = _scorer()
     _pick_up(scorer)
     crouched = _neutral()
     crouched[L_HIP] = (92, 120, 1.0)  # hips nearly at shoulder height
@@ -134,11 +162,36 @@ def test_crouch_while_holding_banks_hold_floor() -> None:
     assert r.behavior_scores["crouch"] == 5.0
 
 
+# === per-criterion offsets (alert timeline) ===
+
+
+def test_behavior_offsets_track_seconds_from_episode_start() -> None:
+    clock = FakeClock()
+    scorer = BehaviorScorer(clock=clock)
+    r1 = _fire_looking(scorer)
+    # First criterion opens the episode → offset 0.
+    assert r1.behavior_offsets["looking_around"] == 0.0
+    # Pick up an item 3s later: its offset is the elapsed episode time; the
+    # first criterion's offset stays put (first firing wins).
+    clock.advance(3.0)
+    _pick_up(scorer)
+    r = scorer.score(1, _neutral(), PERSON_H)
+    assert r.behavior_offsets["item_pickup"] == 3.0
+    assert r.behavior_offsets["looking_around"] == 0.0
+
+
+def test_behavior_offsets_clear_on_episode_reset() -> None:
+    scorer = _scorer()
+    _fire_looking(scorer)
+    r2 = scorer.score(1, _neutral(), PERSON_H)  # IDLE reset closes the episode
+    assert r2.behavior_offsets == {}
+
+
 # === IDLE reset ===
 
 
 def test_idle_reset_clears_episode() -> None:
-    scorer = BehaviorScorer()
+    scorer = _scorer()
     r = _fire_looking(scorer)
     assert r.behaviors  # episode open
     # One calm frame: looking weight (2.0) keeps pct <= green_max, not holding,
@@ -151,7 +204,7 @@ def test_idle_reset_clears_episode() -> None:
 
 
 def test_new_episode_after_reset_starts_fresh_ledger() -> None:
-    scorer = BehaviorScorer()
+    scorer = _scorer()
     _fire_looking(scorer)
     scorer.score(1, _neutral(), PERSON_H)  # reset
     again = _fire_looking(scorer)
@@ -172,12 +225,14 @@ def test_track_payload_carries_episode_fields() -> None:
         det_confidence=0.9,
         behaviors=["looking_around", "item_pickup"],
         behavior_scores={"looking_around": 4.0, "item_pickup": 10.0},
+        behavior_offsets={"looking_around": 0.0, "item_pickup": 3.0},
         reasons=["Орчноо харах", "cell phone авах"],
         episode_started_ms=1760000000000,
     )
     dumped = p.model_dump(mode="json")
     assert dumped["behaviors"] == ["looking_around", "item_pickup"]
     assert dumped["behavior_scores"] == {"looking_around": 4.0, "item_pickup": 10.0}
+    assert dumped["behavior_offsets"] == {"looking_around": 0.0, "item_pickup": 3.0}
     assert dumped["reasons"] == ["Орчноо харах", "cell phone авах"]
     assert dumped["episode_started_ms"] == 1760000000000
 
@@ -188,5 +243,6 @@ def test_track_payload_episode_fields_default_empty() -> None:
     dumped = p.model_dump(mode="json")
     assert dumped["behaviors"] == []
     assert dumped["behavior_scores"] == {}
+    assert dumped["behavior_offsets"] == {}
     assert dumped["reasons"] == []
     assert dumped["episode_started_ms"] is None
