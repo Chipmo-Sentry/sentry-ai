@@ -108,6 +108,31 @@ def _provider_status(client: httpx.Client) -> dict[str, object] | None:
         return None
 
 
+def _vlm_status(client: httpx.Client, settings: Any) -> dict[str, object] | None:
+    """Whether a VLM model is resident in Ollama right now + its GPU split, from
+    /api/ps. Lets the dashboard show 'VLM: qwen3-vl-4b · 3.9 GB · 100% GPU' vs idle.
+    None if Ollama is unreachable. Never raises."""
+    try:
+        r = client.get(settings.ollama_base_url.rstrip("/") + "/api/ps", timeout=5.0)
+        if r.status_code != 200:
+            return None
+        models = list(r.json().get("models", []))
+    except Exception:  # noqa: BLE001
+        return None
+    if not models:
+        return {"loaded": False, "model": None, "vram_mb": 0, "gpu_pct": 0}
+    m = models[0]
+    size = int(m.get("size") or 0)
+    size_vram = int(m.get("size_vram") or 0)
+    gpu_pct = round(size_vram / size * 100) if size else 0
+    return {
+        "loaded": True,
+        "model": m.get("name"),
+        "vram_mb": int(size_vram / 1024 / 1024),
+        "gpu_pct": gpu_pct,
+    }
+
+
 def _telemetry(client: httpx.Client) -> dict[str, object]:
     settings = get_settings()
     fps, active, cameras = _worker_stats(client)
@@ -146,6 +171,10 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
         payload["provider_effective"] = prov.get("effective")
         payload["provider_ready"] = prov.get("ready")
         payload["provider_error"] = prov.get("error")
+    # VLM GPU residency (resource breakdown) — proves whether the VLM is on the GPU.
+    vlm = _vlm_status(client, settings)
+    if vlm is not None:
+        payload["vlm"] = vlm
     return payload
 
 

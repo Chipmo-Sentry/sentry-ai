@@ -69,52 +69,59 @@ class ResourceSample:
     sentry_cpu_pct: float | None = None
     sentry_ram_mb: int | None = None
     sentry_vram_mb: int | None = None
+    # Per-component CPU/RAM breakdown (sentry-ai / Ollama / MediaMTX / Tunnel) so
+    # the dashboard can show WHO uses what. Each: {name, cpu_pct, ram_mb}. None on
+    # a box without psutil. Not part of the numeric metrics time-series.
+    components: list[dict[str, float | int | str | None]] | None = None
 
-    def as_dict(self) -> dict[str, float | int | None]:
+    def as_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
-# Process names (lowercased) that make up the Sentry footprint on this box.
-_SENTRY_PROC_NAMES = {
-    "mediamtx",
-    "mediamtx.exe",
-    "ollama",
-    "ollama.exe",
-    "cloudflared",
-    "cloudflared.exe",
-}
 # Persistent psutil.Process cache so per-process cpu_percent() measures load over
 # the interval between heartbeats (a fresh Process always reports 0.0 first).
 _proc_cache: dict[int, object] = {}
 
 
-def _is_sentry_proc(p: object) -> bool:
-    """True if this process is part of the Sentry stack (by name, or a Python/uv
-    process whose command line runs sentry_ai)."""
+def _category(name: str, cmd: str) -> str | None:
+    """Group a process into a dashboard-facing component, or None if not ours.
+    Substring matches so Ollama's model runner (ollama_llama_server) counts too."""
+    if "mediamtx" in name:
+        return "MediaMTX"
+    if "ollama" in name:
+        return "Ollama"
+    if "cloudflared" in name:
+        return "Tunnel"
+    if name.startswith(("python", "pythonw", "uv")) and "sentry_ai" in cmd:
+        return "sentry-ai"
+    return None
+
+
+def _proc_category(p: object) -> str | None:
     try:
         name = (p.info.get("name") or "").lower()  # type: ignore[attr-defined]
-        if name in _SENTRY_PROC_NAMES:
-            return True
-        if name.startswith(("python", "pythonw", "uv")):
-            cmd = " ".join(p.info.get("cmdline") or []).lower()  # type: ignore[attr-defined]
-            return "sentry_ai" in cmd
+        cmd = " ".join(p.info.get("cmdline") or []).lower()  # type: ignore[attr-defined]
+        return _category(name, cmd)
     except Exception:  # noqa: BLE001 — process vanished / access denied
-        return False
-    return False
+        return None
 
 
 def _sample_sentry(s: ResourceSample) -> None:
-    """Fill the ``sentry_*`` fields with this project's process-scoped usage."""
+    """Fill the ``sentry_*`` totals AND the per-component breakdown (s.components)
+    with this project's process-scoped usage, in a single psutil pass."""
     if not _HAVE_PSUTIL:
         return
     global _proc_cache
     pids: set[int] = set()
     try:
         matched: dict[int, object] = {}
+        cats: dict[int, str] = {}
         for p in psutil.process_iter(["pid", "name", "cmdline"]):
-            if _is_sentry_proc(p):
+            cat = _proc_category(p)
+            if cat is not None:
                 proc = _proc_cache.get(p.pid) or p
                 matched[p.pid] = proc
+                cats[p.pid] = cat
                 pids.add(p.pid)
                 # include children (e.g. ollama's GPU runner) for VRAM matching
                 with contextlib.suppress(Exception):
@@ -122,16 +129,29 @@ def _sample_sentry(s: ResourceSample) -> None:
                         pids.add(c.pid)
         _proc_cache = matched  # drop dead pids
 
-        cpu = 0.0
-        ram = 0
         ncpu = psutil.cpu_count() or 1
-        for proc in matched.values():
+        # Accumulate per component: {category: [cpu_sum, ram_bytes]}.
+        groups: dict[str, list[float]] = {}
+        for pid, proc in matched.items():
+            c = 0.0
+            r = 0
             with contextlib.suppress(Exception):
-                cpu += proc.cpu_percent(None)  # type: ignore[attr-defined]
+                c = proc.cpu_percent(None)  # type: ignore[attr-defined]
             with contextlib.suppress(Exception):
-                ram += int(proc.memory_info().rss)  # type: ignore[attr-defined]
-        s.sentry_cpu_pct = round(cpu / ncpu, 1)
-        s.sentry_ram_mb = int(ram / 1024 / 1024)
+                r = int(proc.memory_info().rss)  # type: ignore[attr-defined]
+            g = groups.setdefault(cats[pid], [0.0, 0.0])
+            g[0] += c
+            g[1] += r
+        s.sentry_cpu_pct = round(sum(g[0] for g in groups.values()) / ncpu, 1)
+        s.sentry_ram_mb = int(sum(g[1] for g in groups.values()) / 1024 / 1024)
+        s.components = [
+            {
+                "name": name,
+                "cpu_pct": round(g[0] / ncpu, 1),
+                "ram_mb": int(g[1] / 1024 / 1024),
+            }
+            for name, g in sorted(groups.items())
+        ]
     except Exception as e:  # noqa: BLE001
         log.debug("psutil.sentry_sample_failed", error=str(e))
 
