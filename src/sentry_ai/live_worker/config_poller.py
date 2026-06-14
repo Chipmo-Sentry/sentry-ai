@@ -106,7 +106,11 @@ class BehaviorConfigPoller:
                 delay = min(delay * 2, POLL_INTERVAL_SEC)
             # Central VLM provider (ADR-0026 central control). Independent of the
             # behavior poll above so a node-config failure never stalls behavior.
-            self._fetch_node_provider(settings)
+            # Broad guard: nothing in here may ever kill the poller thread.
+            try:
+                self._fetch_node_provider(settings)
+            except Exception:  # noqa: BLE001 — poller must survive any provider error
+                log.warning("config_poller.node_provider_unexpected", exc_info=True)
             if self._stop.wait(timeout=delay):
                 break
 

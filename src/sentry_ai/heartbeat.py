@@ -108,10 +108,31 @@ def _provider_status(client: httpx.Client) -> dict[str, object] | None:
         return None
 
 
-def _vlm_status(client: httpx.Client, settings: Any) -> dict[str, object] | None:
-    """Whether a VLM model is resident in Ollama right now + its GPU split, from
-    /api/ps. Lets the dashboard show 'VLM: qwen3-vl-4b · 3.9 GB · 100% GPU' vs idle.
-    None if Ollama is unreachable. Never raises."""
+def _vlm_model_tag(effective_provider: str | None) -> str:
+    """Ollama tag of the effective VLM provider (for matching it in /api/ps). Empty
+    for non-Ollama (vLLM) or unknown providers. Class-attr lookup only — safe in the
+    heartbeat process (no main-process state needed)."""
+    if not effective_provider:
+        return ""
+    try:
+        from sentry_ai.providers.factory import get_provider_class
+
+        cls = get_provider_class(effective_provider)
+    except Exception:  # noqa: BLE001
+        return ""
+    if cls is None or getattr(cls, "runtime", "ollama") != "ollama":
+        return ""
+    return str(getattr(cls, "model_tag", ""))
+
+
+def _vlm_status(
+    client: httpx.Client, settings: Any, effective_provider: str | None
+) -> dict[str, object] | None:
+    """Whether the VLM model is resident in Ollama right now + its GPU split, from
+    /api/ps. Picks the model matching the effective provider's tag — NOT models[0],
+    which can be the RAG embed model (nomic-embed-text) that's also resident. Lets the
+    dashboard show 'qwen3-vl-4b · 3.9 GB · 100% GPU' vs idle. None if Ollama is
+    unreachable. Never raises."""
     try:
         r = client.get(settings.ollama_base_url.rstrip("/") + "/api/ps", timeout=5.0)
         if r.status_code != 200:
@@ -119,9 +140,21 @@ def _vlm_status(client: httpx.Client, settings: Any) -> dict[str, object] | None
         models = list(r.json().get("models", []))
     except Exception:  # noqa: BLE001
         return None
+    idle: dict[str, object] = {"loaded": False, "model": None, "vram_mb": 0, "gpu_pct": 0}
     if not models:
-        return {"loaded": False, "model": None, "vram_mb": 0, "gpu_pct": 0}
-    m = models[0]
+        return idle
+    want = _vlm_model_tag(effective_provider)
+    m = None
+    if want:
+        m = next((x for x in models if str(x.get("name", "")) == want), None)
+    if m is None:
+        # No exact match (unknown provider / vLLM): exclude the RAG embed model and
+        # take the largest remaining by VRAM — the VLM dominates by size.
+        embed = (settings.embed_model or "").split(":")[0]
+        cands = [x for x in models if not (embed and str(x.get("name", "")).startswith(embed))]
+        m = max(cands, key=lambda x: int(x.get("size_vram") or 0), default=None)
+    if m is None:
+        return idle  # only the embed model is resident → VLM is idle
     size = int(m.get("size") or 0)
     size_vram = int(m.get("size_vram") or 0)
     gpu_pct = round(size_vram / size * 100) if size else 0
@@ -167,12 +200,16 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
     # provider is what verify actually uses; the dashboard compares it to the
     # desired (node.provider) to show applied/applying, and surfaces errors.
     prov = _provider_status(client)
+    effective_provider: str | None = None
     if prov is not None:
         payload["provider_effective"] = prov.get("effective")
         payload["provider_ready"] = prov.get("ready")
         payload["provider_error"] = prov.get("error")
-    # VLM GPU residency (resource breakdown) — proves whether the VLM is on the GPU.
-    vlm = _vlm_status(client, settings)
+        eff = prov.get("effective")
+        effective_provider = eff if isinstance(eff, str) else None
+    # VLM GPU residency (resource breakdown) — matched to the effective provider so
+    # the resident RAG embed model isn't misreported as the VLM.
+    vlm = _vlm_status(client, settings, effective_provider)
     if vlm is not None:
         payload["vlm"] = vlm
     return payload
