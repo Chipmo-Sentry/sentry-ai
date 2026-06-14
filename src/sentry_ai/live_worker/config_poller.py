@@ -49,6 +49,10 @@ class BehaviorConfigPoller:
         self._last_thresholds: tuple[float, float, float] | None = None
         self._last_params: tuple[dict[str, float], dict[str, dict[str, float]]] | None = None
         self._lock = threading.Lock()
+        # Debounce TRANSIENT provider-readiness failures (Ollama momentarily busy /
+        # mid-model-load) so a single slow probe doesn't flap the dashboard to a
+        # scary "Ollama холбогдсонгүй". A real outage still surfaces after a few polls.
+        self._provider_fail_count = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -131,8 +135,19 @@ class BehaviorConfigPoller:
             set_central_provider(provider)
         # Readiness: which provider will verify actually use, and is its model up?
         effective = resolve_provider_name(None)
-        ready, error = _check_provider_ready(effective, settings)
-        set_provider_health(effective, ready, error)
+        ready, error, transient = _check_provider_ready(effective, settings)
+        if ready or not transient:
+            # ready, or a deterministic config error (model not pulled) → report now.
+            self._provider_fail_count = 0
+            set_provider_health(effective, ready, error)
+        else:
+            # Transient (runtime momentarily unreachable). Show a neutral "checking"
+            # state, not a red error, until it fails PROVIDER_FAIL_LIMIT polls in a row.
+            self._provider_fail_count += 1
+            if self._provider_fail_count >= PROVIDER_FAIL_LIMIT:
+                set_provider_health(effective, False, error)
+            else:
+                set_provider_health(effective, False, None)
 
     def _fetch_and_dispatch(self, url: str) -> None:
         with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:
@@ -208,34 +223,52 @@ class BehaviorConfigPoller:
             )
 
 
-def _check_provider_ready(effective: str, settings: Any) -> tuple[bool, str | None]:
-    """Confirm the effective provider's backing model is actually reachable, so the
-    dashboard surfaces a real error (e.g. model not pulled) instead of failing only
-    at the next breach. Returns (ready, error_message_mn). Never raises."""
+PROVIDER_FAIL_LIMIT = 3  # consecutive transient probe failures before alarming
+_PROBE_TIMEOUT_SEC = 8.0  # generous — Ollama can be slow while loading a model
+
+
+def _get_with_retry(url: str) -> httpx.Response:
+    """GET with one retry — absorbs a single slow/blipped response (e.g. Ollama
+    busy mid-model-load) so readiness doesn't false-fail on a transient hiccup."""
+    last: httpx.HTTPError | None = None
+    for _ in range(2):
+        try:
+            with httpx.Client(timeout=_PROBE_TIMEOUT_SEC) as c:
+                resp = c.get(url)
+                resp.raise_for_status()
+                return resp
+        except httpx.HTTPError as e:
+            last = e
+    raise last if last is not None else httpx.HTTPError("probe failed")
+
+
+def _check_provider_ready(effective: str, settings: Any) -> tuple[bool, str | None, bool]:
+    """Confirm the effective provider's backing model is reachable, so the dashboard
+    surfaces a real error (e.g. model not pulled) instead of failing only at the next
+    breach. Returns (ready, error_message_mn, transient). `transient=True` means a
+    momentary connectivity blip the caller should debounce; `transient=False` means a
+    deterministic config error (model not pulled) safe to surface immediately. Never raises."""
     from sentry_ai.providers.factory import get_provider_class
 
     cls = get_provider_class(effective)
     if cls is None:
-        return False, f"Тодорхойгүй provider: {effective}"
+        return False, f"Тодорхойгүй provider: {effective}", False
     runtime = getattr(cls, "runtime", "ollama")
     try:
         if runtime == "vllm":
             base = settings.vllm_base_url.rstrip("/")
-            with httpx.Client(timeout=4.0) as c:
-                c.get(base + "/models").raise_for_status()
-            return True, None
+            _get_with_retry(base + "/models")
+            return True, None, False
         # Ollama-backed: the model tag must be pulled on this node.
         tag = getattr(cls, "model_tag", "")
-        with httpx.Client(timeout=4.0) as c:
-            r = c.get(settings.ollama_base_url.rstrip("/") + "/api/tags")
-            r.raise_for_status()
-            names = {m.get("name", "") for m in r.json().get("models", [])}
+        r = _get_with_retry(settings.ollama_base_url.rstrip("/") + "/api/tags")
+        names = {m.get("name", "") for m in r.json().get("models", [])}
         if tag and tag not in names:
-            return False, f"Ollama-д '{tag}' татагдаагүй — `ollama pull {tag}`"
+            return False, f"Ollama-д '{tag}' татагдаагүй — `ollama pull {tag}`", False
     except httpx.HTTPError:
         where = "vLLM сервер" if runtime == "vllm" else "Ollama"
-        return False, f"{where} холбогдсонгүй"
-    return True, None
+        return False, f"{where} холбогдсонгүй", True  # transient → caller debounces
+    return True, None, False
 
 
 _poller: BehaviorConfigPoller | None = None

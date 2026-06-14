@@ -42,12 +42,17 @@ _proc: subprocess.Popen[bytes] | None = None
 
 
 def _probe(client: httpx.Client, url: str) -> bool:
-    """True if `url` answers below 500 within a short timeout. Never raises."""
-    try:
-        resp = client.get(url, timeout=3.0)
-        return resp.status_code < 500
-    except Exception:  # noqa: BLE001 — any failure = down
-        return False
+    """True if `url` answers below 500. Retries once with a generous timeout so a
+    momentary blip (e.g. Ollama busy mid-model-load) doesn't flap the health dot to
+    red. Never raises."""
+    for _ in range(2):
+        try:
+            resp = client.get(url, timeout=6.0)
+            if resp.status_code < 500:
+                return True
+        except Exception:  # noqa: BLE001 — any failure = retry, then down
+            pass
+    return False
 
 
 def _camera_health(workers: list[dict[str, Any]]) -> list[dict[str, object]]:
