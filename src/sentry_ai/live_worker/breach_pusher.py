@@ -118,6 +118,41 @@ def _clip_window(
     return -duration, duration
 
 
+async def _report_cleared(
+    *,
+    mediamtx_path: str,
+    reason: str,
+    peak_risk_pct: float,
+    person_id: int,
+    behaviors: list[str],
+    category: str | None = None,
+    confidence: float | None = None,
+) -> None:
+    """Tell the backend a breach was detected but produced NO alert (VLM cleared
+    it, or the clip-cut failed) so the miss is VISIBLE on the activity timeline
+    instead of silently lost. Best-effort; never raises."""
+    settings = get_settings()
+    url = settings.sentry_backend_url.rstrip("/") + "/api/v1/internal/breach-cleared"
+    headers = {
+        "Authorization": f"Bearer {settings.sentry_backend_service_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "camera_id": mediamtx_path,
+        "reason": reason,
+        "peak_risk_pct": peak_risk_pct,
+        "person_id": person_id,
+        "category": category,
+        "confidence": confidence,
+        "triggered_behaviors": behaviors or None,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_POST_TIMEOUT_SEC) as client_http:
+            await client_http.post(url, json=payload, headers=headers)
+    except httpx.HTTPError:
+        log.warning("breach_cleared.post_error", mediamtx_path=mediamtx_path, exc_info=True)
+
+
 async def _cut_verify_push(
     mediamtx_path: str,
     person_id: int,
@@ -152,6 +187,13 @@ async def _cut_verify_push(
         )
     except clip_cutter.ClipCutError as e:
         log.warning("breach_push.cut_failed", mediamtx_path=mediamtx_path, error=str(e))
+        await _report_cleared(
+            mediamtx_path=mediamtx_path,
+            reason="cut_failed",
+            peak_risk_pct=peak_risk_pct,
+            person_id=person_id,
+            behaviors=behaviors,
+        )
         return
 
     # Fresh Ollama client bound to THIS event loop (avoids cross-loop reuse with
@@ -176,6 +218,16 @@ async def _cut_verify_push(
             "breach_push.vlm_cleared",
             mediamtx_path=mediamtx_path,
             person_id=person_id,
+            category=output.category.value,
+            confidence=output.confidence,
+        )
+        reason = "vlm_browsing" if output.category.value == "browsing" else "vlm_low_confidence"
+        await _report_cleared(
+            mediamtx_path=mediamtx_path,
+            reason=reason,
+            peak_risk_pct=peak_risk_pct,
+            person_id=person_id,
+            behaviors=behaviors,
             category=output.category.value,
             confidence=output.confidence,
         )
