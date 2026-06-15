@@ -64,10 +64,15 @@ class CameraWorker:
         store_id: str | None = None,
         registry: StorePersonRegistry | None = None,
         embedder: Embedder | None = None,
+        alert_threshold_pct: float | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.frame_skip = max(1, frame_skip)
+        # Per-camera breach threshold (0-100) from the backend. None → fall back to
+        # the node-global default. This is THE threshold the node fires breaches at;
+        # before this the backend's per-camera risk_threshold was ignored entirely.
+        self.alert_threshold_pct = alert_threshold_pct
         self.yolo_conf = yolo_conf
         self._emitter = emitter
         # Cross-camera re-ID (ADR-0022/0023): when a store registry + embedder are
@@ -108,7 +113,9 @@ class CameraWorker:
         # sustained breach we hand off to breach_pusher (cut + VLM + POST to the
         # backend) on its own worker — this frame loop never blocks on it.
         _s = get_settings()
-        self._alert_threshold_pct = _s.live_alert_threshold_pct
+        self._alert_threshold_pct = (
+            alert_threshold_pct if alert_threshold_pct is not None else _s.live_alert_threshold_pct
+        )
         self._breach_sustain_sec = _s.live_breach_sustain_sec
         self._breach_cooldown_sec = _s.live_breach_cooldown_sec
         # tracker_id -> {above_since, last_breach, peak, last_seen} (monotonic ts)

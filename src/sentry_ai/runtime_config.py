@@ -22,6 +22,12 @@ from dataclasses import dataclass
 
 _lock = threading.Lock()
 _central_provider: str | None = None
+# Live-breach topology pushed from the backend (ADR-0026 central control), the
+# SINGLE authority for whether this node creates breach alerts. None until the
+# first node-config poll, when the env bootstrap (settings.live_alert_push_enabled)
+# is the fallback. "node_push" = detect + cut + VLM + POST; "off" = no alerts.
+_BREACH_MODES = ("node_push", "off")
+_central_breach_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,30 @@ def set_central_provider(name: str | None) -> None:
 def get_central_provider() -> str | None:
     with _lock:
         return _central_provider
+
+
+def set_central_breach_mode(mode: str | None) -> None:
+    """Called by the config poller after each node-config fetch. Ignores unknown
+    values so a typo in the DB never silently disables alerting."""
+    global _central_breach_mode
+    if mode is not None and mode not in _BREACH_MODES:
+        return
+    with _lock:
+        _central_breach_mode = mode
+
+
+def resolve_breach_mode() -> str:
+    """The breach topology this node will actually apply: the centrally-chosen
+    value if one has been polled, else the .env bootstrap
+    (live_alert_push_enabled → node_push/off). One source → the node and backend
+    can never drift into double-firing or a silent no-op."""
+    with _lock:
+        central = _central_breach_mode
+    if central in _BREACH_MODES:
+        return central
+    from sentry_ai.settings import get_settings
+
+    return "node_push" if get_settings().live_alert_push_enabled else "off"
 
 
 def set_provider_health(effective: str | None, ready: bool, error: str | None) -> None:

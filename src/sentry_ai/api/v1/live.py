@@ -41,7 +41,12 @@ def start(req: LiveStartRequest) -> dict[str, str]:
             detail="Live RTSP workers must not run on Railway — deploy sentry-ai on the GPU/VPS host",
         )
     _validate_rtsp_url(req.rtsp_url)
-    get_manager().start_camera(req.camera_id, req.rtsp_url, store_id=req.store_id)
+    get_manager().start_camera(
+        req.camera_id,
+        req.rtsp_url,
+        store_id=req.store_id,
+        alert_threshold_pct=req.risk_threshold,
+    )
     return {"camera_id": req.camera_id, "status": "starting"}
 
 
@@ -63,13 +68,19 @@ def emitter_stats() -> dict[str, int]:
 
 @router.get("/provider")
 def provider_status() -> dict[str, object]:
-    """Effective VLM provider this node will actually use + readiness, so the
-    heartbeat (and thus the dashboard) can show whether a central provider change
-    was really applied on the server. Set by the config poller."""
-    from sentry_ai.runtime_config import get_provider_health
+    """Effective VLM provider this node will actually use + readiness, plus the
+    effective live-breach topology, so the heartbeat (and thus the dashboard) can
+    show whether a central change was really applied on the server. Set by the
+    config poller."""
+    from sentry_ai.runtime_config import get_provider_health, resolve_breach_mode
 
     h = get_provider_health()
-    return {"effective": h.effective, "ready": h.ready, "error": h.error}
+    return {
+        "effective": h.effective,
+        "ready": h.ready,
+        "error": h.error,
+        "breach_mode": resolve_breach_mode(),
+    }
 
 
 @router.get(

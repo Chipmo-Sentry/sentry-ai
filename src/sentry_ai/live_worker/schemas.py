@@ -75,6 +75,12 @@ class LiveStartRequest(BaseModel):
     store_id: str | None = Field(
         default=None, description="Enables store-scoped cross-camera re-ID (ADR-0023)"
     )
+    risk_threshold: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Per-camera breach threshold (0-100). None → node-global default.",
+    )
 
 
 class LiveWorkerStatus(BaseModel):

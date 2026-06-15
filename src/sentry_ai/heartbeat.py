@@ -207,6 +207,11 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
         payload["provider_error"] = prov.get("error")
         eff = prov.get("effective")
         effective_provider = eff if isinstance(eff, str) else None
+        # Effective live-breach topology the node applied (central-control feedback,
+        # alongside the provider) so the dashboard shows applied vs applying.
+        bm = prov.get("breach_mode")
+        if isinstance(bm, str):
+            payload["breach_mode_effective"] = bm
     # VLM GPU residency (resource breakdown) — matched to the effective provider so
     # the resident RAG embed model isn't misreported as the VLM.
     vlm = _vlm_status(client, settings, effective_provider)

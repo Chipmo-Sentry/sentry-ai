@@ -51,7 +51,12 @@ def submit_breach(
     breach_ts_ms: int,
 ) -> None:
     """Fire-and-forget: queue a breach for cut+VLM+push. Never blocks the caller."""
-    if not get_settings().live_alert_push_enabled:
+    # Topology is backend-authoritative (ADR-0026): the node pushes only when the
+    # centrally-chosen breach_mode is "node_push" (env is just the pre-poll
+    # bootstrap). "off" → AI/overlay keep running, but we create no alerts.
+    from sentry_ai.runtime_config import resolve_breach_mode
+
+    if resolve_breach_mode() != "node_push":
         return
     _executor.submit(
         _handle,

@@ -35,7 +35,12 @@ class LiveWorkerManager:
         return reg
 
     def start_camera(
-        self, camera_id: str, rtsp_url: str, frame_skip: int = 3, store_id: str | None = None
+        self,
+        camera_id: str,
+        rtsp_url: str,
+        frame_skip: int = 3,
+        store_id: str | None = None,
+        alert_threshold_pct: float | None = None,
     ) -> None:
         with self._lock:
             if not self._emitter_started:
@@ -45,10 +50,14 @@ class LiveWorkerManager:
 
             existing = self._workers.get(camera_id)
             if existing is not None and existing.running:
-                if existing.rtsp_url == rtsp_url:
+                # Restart on a changed source OR a changed breach threshold so a
+                # web-UI threshold edit takes effect (the worker reads it at start).
+                if (
+                    existing.rtsp_url == rtsp_url
+                    and existing.alert_threshold_pct == alert_threshold_pct
+                ):
                     log.info("manager.already_running", camera_id=camera_id)
                     return
-                # URL changed → restart
                 existing.stop()
 
             registry = self._get_registry(store_id) if store_id else None
@@ -60,6 +69,7 @@ class LiveWorkerManager:
                 store_id=store_id,
                 registry=registry,
                 embedder=self._embedder if registry is not None else None,
+                alert_threshold_pct=alert_threshold_pct,
             )
             worker.start()
             self._workers[camera_id] = worker

@@ -121,7 +121,11 @@ class BehaviorConfigPoller:
         the server actually applied it. Best-effort, paired nodes only; failures
         are logged and never raised."""
         from sentry_ai.providers.factory import resolve_provider_name
-        from sentry_ai.runtime_config import set_central_provider, set_provider_health
+        from sentry_ai.runtime_config import (
+            set_central_breach_mode,
+            set_central_provider,
+            set_provider_health,
+        )
 
         if not settings.ai_node_id:
             return
@@ -131,12 +135,18 @@ class BehaviorConfigPoller:
             with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:
                 r = client.get(url, headers=headers)
                 r.raise_for_status()
-                provider = r.json().get("provider")
+                cfg = r.json()
+                provider = cfg.get("provider")
+                breach_mode = cfg.get("breach_mode")
         except (httpx.HTTPError, ValueError) as e:
             log.warning("config_poller.node_config_failed", error=str(e))
             return
         if isinstance(provider, str) and provider:
             set_central_provider(provider)
+        # Live-breach topology (central control). set_central_breach_mode ignores
+        # unknown values, so a bad DB value can't silently disable alerting.
+        if isinstance(breach_mode, str) and breach_mode:
+            set_central_breach_mode(breach_mode)
         # Readiness: which provider will verify actually use, and is its model up?
         effective = resolve_provider_name(None)
         ready, error, transient = _check_provider_ready(effective, settings)
