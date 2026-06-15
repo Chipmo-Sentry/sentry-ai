@@ -17,7 +17,8 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from sentry_ai.live_worker.behavior import BehaviorScorer
+from sentry_ai.live_worker import breach_pusher
+from sentry_ai.live_worker.behavior import BehaviorScorer, ScoreResult
 from sentry_ai.live_worker.emitter import MetadataEmitter
 from sentry_ai.live_worker.reid import Embedder, StorePersonRegistry
 from sentry_ai.live_worker.schemas import FrameMetadata, TrackPayload
@@ -25,6 +26,7 @@ from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
 from sentry_ai.live_worker.yolo_det import Item, YoloItemRunner
 from sentry_ai.live_worker.yolo_runner import YoloPoseRunner
 from sentry_ai.logging_setup import get_logger
+from sentry_ai.settings import get_settings
 
 log = get_logger("sentry_ai.live_worker.camera")
 
@@ -101,6 +103,16 @@ class CameraWorker:
         self._item_every_n = 5
         self._inference_count = 0
         self._cached_items: list[Item] = []
+
+        # Node-push live alerts: per-track sustain timer + cooldown. On a
+        # sustained breach we hand off to breach_pusher (cut + VLM + POST to the
+        # backend) on its own worker — this frame loop never blocks on it.
+        _s = get_settings()
+        self._alert_threshold_pct = _s.live_alert_threshold_pct
+        self._breach_sustain_sec = _s.live_breach_sustain_sec
+        self._breach_cooldown_sec = _s.live_breach_cooldown_sec
+        # tracker_id -> {above_since, last_breach, peak, last_seen} (monotonic ts)
+        self._breach_state: dict[int, dict[str, float]] = {}
 
         # Config delivered by poller BEFORE scorer initializes — buffer and
         # apply once scorer is live (fixes config-poller race condition).
@@ -385,10 +397,18 @@ class CameraWorker:
                 ),
             )
 
+            # Node-push: detect a sustained breach for this person → hand off.
+            self._maybe_breach(t.tracker_id, risk_pct, result, now)
+
         # Periodic stale-track cleanup (~once per second @ 5 FPS)
         if self._frames_total - self._last_cleanup_frame > 30:
             self._scorer.cleanup_stale()
             self._last_cleanup_frame = self._frames_total
+            stale_breach = [
+                tid for tid, bs in self._breach_state.items() if now - bs["last_seen"] > 300.0
+            ]
+            for tid in stale_breach:
+                del self._breach_state[tid]
 
         payload = FrameMetadata(
             camera_id=self.camera_id,
@@ -403,6 +423,64 @@ class CameraWorker:
 
         # Update annotated snapshot for /v1/live/snapshot/{cam} debug viewer
         self._update_snapshot(frame_bgr, tracked, tracks_payload)
+
+    def _maybe_breach(
+        self, tracker_id: int, risk_pct: float, result: ScoreResult, now: float
+    ) -> None:
+        """Per-person sustain timer + cooldown. On a confirmed sustained breach,
+        hand the episode to breach_pusher (cut + VLM + POST to backend). Mirrors
+        the backend threshold_handler so behaviour is identical, just node-side."""
+        bs = self._breach_state.setdefault(
+            tracker_id, {"active": 0.0, "last_breach": 0.0, "peak": 0.0, "last_seen": 0.0}
+        )
+        bs["last_seen"] = now
+        if now - bs["last_breach"] < self._breach_cooldown_sec:
+            return
+        if risk_pct < self._alert_threshold_pct:
+            bs["active"] = 0.0
+            return
+        bs["peak"] = max(bs["peak"], risk_pct)
+        if bs["active"] == 0.0:
+            bs["active"] = now  # first frame above threshold
+            return
+        if now - bs["active"] < self._breach_sustain_sec:
+            return  # not sustained long enough yet
+        # Confirmed sustained breach.
+        peak = bs["peak"]
+        bs["last_breach"] = now
+        bs["active"] = 0.0
+        bs["peak"] = 0.0
+        self._submit_breach(tracker_id, peak, result)
+
+    def _submit_breach(self, tracker_id: int, peak_risk_pct: float, result: ScoreResult) -> None:
+        detail = [
+            {
+                "key": k,
+                "offset_sec": round(float(result.behavior_offsets.get(k, 0.0)), 1),
+                "score": round(float(result.behavior_scores.get(k, 0.0)), 1),
+            }
+            for k in result.behaviors
+        ]
+        episode_ms = (
+            int(result.episode_started_at * 1000) if result.episode_started_at is not None else None
+        )
+        log.info(
+            "camera.breach",
+            camera_id=self.camera_id,
+            person_id=tracker_id,
+            peak_risk_pct=round(peak_risk_pct, 1),
+            behaviors=result.behaviors,
+        )
+        breach_pusher.submit_breach(
+            mediamtx_path=self.camera_id,
+            person_id=tracker_id,
+            peak_risk_pct=peak_risk_pct,
+            behaviors=list(result.behaviors),
+            sequences=list(result.sequences),
+            behavior_detail=detail,
+            episode_started_ms=episode_ms,
+            breach_ts_ms=int(time.time() * 1000),
+        )
 
     def _update_snapshot(
         self,

@@ -72,6 +72,25 @@ class Settings(BaseSettings):
     live_auto_start_store_id: str | None = None
     live_frame_skip: int = 3  # analyze every Nth frame (10 FPS on 30 FPS source)
 
+    # --- Node-push live alerts ---
+    # The node detects a sustained risk breach itself, cuts + VLM-verifies
+    # LOCALLY, and POSTs the finished alert to the backend
+    # (/api/v1/internal/live-alert). Outbound = reliable, unlike the retired
+    # cloud→node /v1/cut-verify pull. Disable to stop pushing (backend must then
+    # use its own pull path — see backend live_alerts_via_node_push).
+    live_alert_push_enabled: bool = True
+    # Risk % a tracked person must reach to trigger a breach (matches the
+    # backend's per-camera risk_threshold default; yellow band). Sustained for
+    # sustain_sec, then debounced per person for cooldown_sec.
+    live_alert_threshold_pct: float = 11.0
+    live_breach_sustain_sec: float = 1.0
+    live_breach_cooldown_sec: float = 30.0
+    # Wait this long after the breach before cutting, so the clip catches the act
+    # COMPLETING; plus clip-window pre-pad + a hard cap on total length.
+    live_breach_post_roll_sec: float = 10.0
+    live_clip_pre_pad_sec: int = 3
+    live_clip_max_sec: int = 45
+
     # YOLO weights (#3, ADR-0026). Pose drives ALL behavior detection, so accuracy
     # here is foundational — YOLO26 is NMS-free end-to-end and its RLE head scores
     # occluded joints better than YOLO11 (+~7 AP COCO-pose). Ultralytics
