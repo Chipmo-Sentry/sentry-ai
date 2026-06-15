@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     frames_per_clip: int = 5
     frame_max_dim: int = 640
     frame_jpeg_quality: int = 85
+    # ffmpeg binary for clip cutting. Bare "ffmpeg" works when it's on PATH; set
+    # an absolute path when the node runs as a service without ffmpeg on PATH
+    # (e.g. FFMPEG_PATH=D:/ChipmoSentryAI/bin/ffmpeg.exe).
+    ffmpeg_path: str = "ffmpeg"
 
     # Backend integration (sentry-ai → sentry-backend)
     sentry_backend_url: str = "http://localhost:8000"

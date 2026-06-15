@@ -168,7 +168,7 @@ async def cut_window(
         )
         await _run_ffmpeg(
             [
-                "ffmpeg",
+                settings.ffmpeg_path,
                 "-y",
                 "-loglevel",
                 "error",
