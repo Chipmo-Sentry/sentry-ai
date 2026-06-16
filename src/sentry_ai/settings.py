@@ -47,10 +47,12 @@ class Settings(BaseSettings):
     vlm_num_ctx: int = 8192
 
     # Frame extraction (Stage 2 input). VLM-primary scans run on a fast cadence,
-    # so fewer + smaller frames per clip = much less VLM work per scan (the 5×640
-    # default made each verify slow). 3×480 still shows the gesture across the clip.
-    frames_per_clip: int = 3
-    frame_max_dim: int = 480
+    # so fewer + smaller frames = far fewer vision tokens = faster VLM. Measured:
+    # 5×640 and 3×480 were both ~45-50s on the 8 GB 4060 (camera contention ruled
+    # out). 1×320 is the minimal-token test to see if the VLM is token-bound vs
+    # just too heavy for this GPU. Raise once we know where the latency sits.
+    frames_per_clip: int = 1
+    frame_max_dim: int = 320
     frame_jpeg_quality: int = 85
     # ffmpeg binary for clip cutting. Bare "ffmpeg" works when it's on PATH; set
     # an absolute path when the node runs as a service without ffmpeg on PATH
