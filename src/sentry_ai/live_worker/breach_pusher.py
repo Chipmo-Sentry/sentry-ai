@@ -211,28 +211,20 @@ async def _cut_verify_push(
     finally:
         await client.aclose()
 
-    # Ignore gate (mirror backend derive_alert_level): browsing / low confidence
-    # never becomes an alert — drop it here so we don't ship a clip for nothing.
+    # Surface EVERY sustained breach in the menu WITH its clip so the operator
+    # can review it — the VLM verdict only sets the alert LEVEL on the backend
+    # (theft → notify/review; browsing / low-confidence → log = "Бүртгэсэн"). We
+    # no longer DROP browsing here: a detected episode the human never sees is
+    # worse than a low-priority one they can glance at + dismiss. (Loss-
+    # prevention: the AI surfaces candidates; the human makes the call.)
     if output.category.value == "browsing" or output.confidence < _IGNORE_CONF:
         log.info(
-            "breach_push.vlm_cleared",
+            "breach_push.low_signal",
             mediamtx_path=mediamtx_path,
             person_id=person_id,
             category=output.category.value,
             confidence=output.confidence,
         )
-        reason = "vlm_browsing" if output.category.value == "browsing" else "vlm_low_confidence"
-        await _report_cleared(
-            mediamtx_path=mediamtx_path,
-            reason=reason,
-            peak_risk_pct=peak_risk_pct,
-            person_id=person_id,
-            behaviors=behaviors,
-            category=output.category.value,
-            confidence=output.confidence,
-        )
-        Path(cut.storage_path).unlink(missing_ok=True)  # noqa: ASYNC240
-        return
 
     # Embedding is best-effort (RAG loop enrichment); never block the alert on it.
     embedding: list[float] | None = None
