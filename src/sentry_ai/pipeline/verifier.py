@@ -26,7 +26,9 @@ async def verify_clip(
         quality=settings.frame_jpeg_quality,
     )
 
-    prompt = render_prompt("verify_v1.j2", store_context=store_context)
+    prompt = render_prompt(
+        "verify_v1.j2", store_context=store_context, frame_count=settings.frames_per_clip
+    )
 
     from sentry_ai import runtime_config
 
