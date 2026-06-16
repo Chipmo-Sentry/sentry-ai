@@ -189,6 +189,9 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
         "fps_inference": fps,
         "active_cameras": active,
         "version": __version__,
+        # The pose model the live worker actually loads (so the dashboard shows
+        # whether YOLO26 or YOLO11 is running). ".pt" stripped for display.
+        "yolo_model": settings.yolo_pose_weights.removesuffix(".pt"),
         "health": health,
         **resources,
     }
