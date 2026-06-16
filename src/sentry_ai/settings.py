@@ -115,9 +115,13 @@ class Settings(BaseSettings):
     live_breach_cooldown_sec: float = 30.0
     # Wait this long after the breach before cutting, so the clip catches the act
     # COMPLETING; plus clip-window pre-pad + a hard cap on total length.
-    live_breach_post_roll_sec: float = 10.0
+    # VLM-primary scan: cut the RECENT few seconds and verify NOW. The old 10s
+    # post-roll + 45s max made each scan ~90s (slow cut/probe of a long clip +
+    # cold VLM) → the 3s cadence collapsed. A short recent clip keeps each scan
+    # near the VLM's own latency (~7-8s on the 8 GB GPU, the real ceiling).
+    live_breach_post_roll_sec: float = 0.5
     live_clip_pre_pad_sec: int = 3
-    live_clip_max_sec: int = 45
+    live_clip_max_sec: int = 6
 
     # YOLO weights (#3, ADR-0026). Pose drives ALL behavior detection, so accuracy
     # here is foundational — YOLO26 is NMS-free end-to-end and its RLE head scores
