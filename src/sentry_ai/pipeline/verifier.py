@@ -28,6 +28,8 @@ async def verify_clip(
 
     prompt = render_prompt("verify_v1.j2", store_context=store_context)
 
+    from sentry_ai import runtime_config
+
     last_err: VLMParseError | None = None
     started = time.perf_counter()
     for _attempt in range(settings.retry_on_parse_error + 1):
@@ -36,14 +38,18 @@ async def verify_clip(
                 frames, prompt, timeout_sec=settings.inference_timeout_sec
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
+            # Record the GPU run so the dashboard shows the VLM's activity history.
+            runtime_config.record_vlm_verify(latency_ms)
             return output, latency_ms, len(frames)
         except VLMParseError as e:
             last_err = e
             continue
 
     # All retries exhausted — fall back to a neutral verdict so the pipeline
-    # always returns something (better than 500ing the backend).
+    # always returns something (better than 500ing the backend). The VLM still
+    # ran on the GPU, so still count it.
     latency_ms = int((time.perf_counter() - started) * 1000)
+    runtime_config.record_vlm_verify(latency_ms)
     return (
         VLMOutput(
             category=Category.other,

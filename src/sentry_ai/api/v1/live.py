@@ -72,7 +72,11 @@ def provider_status() -> dict[str, object]:
     effective live-breach topology, so the heartbeat (and thus the dashboard) can
     show whether a central change was really applied on the server. Set by the
     config poller."""
-    from sentry_ai.runtime_config import get_provider_health, resolve_breach_mode
+    from sentry_ai.runtime_config import (
+        get_provider_health,
+        get_vlm_activity,
+        resolve_breach_mode,
+    )
 
     h = get_provider_health()
     return {
@@ -80,6 +84,7 @@ def provider_status() -> dict[str, object]:
         "ready": h.ready,
         "error": h.error,
         "breach_mode": resolve_breach_mode(),
+        "activity": get_vlm_activity(),
     }
 
 

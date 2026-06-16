@@ -212,6 +212,10 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
         bm = prov.get("breach_mode")
         if isinstance(bm, str):
             payload["breach_mode_effective"] = bm
+        # VLM run history — proves the VLM HAS run on the GPU even while idle now.
+        act = prov.get("activity")
+        if isinstance(act, dict):
+            payload["vlm_activity"] = act
     # VLM GPU residency (resource breakdown) — matched to the effective provider so
     # the resident RAG embed model isn't misreported as the VLM.
     vlm = _vlm_status(client, settings, effective_provider)

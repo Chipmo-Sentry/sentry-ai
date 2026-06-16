@@ -84,6 +84,36 @@ def set_provider_health(effective: str | None, ready: bool, error: str | None) -
         _health = ProviderHealth(effective=effective, ready=ready, error=error)
 
 
+# --- VLM verify activity (so the dashboard can show the VLM HAS run on the GPU,
+# even though it's event-driven and idle most of the time). Recorded by every
+# verify path via pipeline.verifier.verify_clip; read by the /v1/live/provider
+# endpoint (same process) and reported in the heartbeat.
+import time  # noqa: E402
+
+_vlm_count = 0
+_vlm_last_at: float | None = None
+_vlm_last_latency_ms: int | None = None
+
+
+def record_vlm_verify(latency_ms: int) -> None:
+    global _vlm_count, _vlm_last_at, _vlm_last_latency_ms
+    with _lock:
+        _vlm_count += 1
+        _vlm_last_at = time.time()
+        _vlm_last_latency_ms = latency_ms
+
+
+def get_vlm_activity() -> dict[str, object]:
+    """{count, last_ago_sec, last_latency_ms}. last_ago_sec computed in-process so
+    it never depends on the browser's clock matching the node's."""
+    with _lock:
+        count = _vlm_count
+        last_at = _vlm_last_at
+        lat = _vlm_last_latency_ms
+    ago = int(time.time() - last_at) if last_at is not None else None
+    return {"count": count, "last_ago_sec": ago, "last_latency_ms": lat}
+
+
 def get_provider_health() -> ProviderHealth:
     with _lock:
         return _health
