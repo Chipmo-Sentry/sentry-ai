@@ -21,6 +21,7 @@ import asyncio
 import base64
 import math
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -218,6 +219,7 @@ async def _cut_verify_push(
         timeout_sec=settings.inference_timeout_sec,
         num_ctx=settings.vlm_num_ctx,
     )
+    _verify_t0 = time.monotonic()
     try:
         provider = get_provider(resolve_provider_name(None), client)
         output, latency_ms, _frames = await verify_clip(
@@ -225,6 +227,18 @@ async def _cut_verify_push(
         )
     finally:
         await client.aclose()
+    # Split the scan latency so we can SEE where the time goes: total verify wall
+    # time vs the VLM's own inference (latency_ms). extract ≈ total − VLM.
+    verify_total_ms = int((time.monotonic() - _verify_t0) * 1000)
+    log.info(
+        "breach_push.verify_timing",
+        mediamtx_path=mediamtx_path,
+        verify_total_ms=verify_total_ms,
+        vlm_ms=latency_ms,
+        extract_ms=max(0, verify_total_ms - latency_ms),
+        category=output.category.value,
+        confidence=round(output.confidence, 2),
+    )
 
     # Surface EVERY sustained breach in the menu WITH its clip so the operator
     # can review it — the VLM verdict only sets the alert LEVEL on the backend

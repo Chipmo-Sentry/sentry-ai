@@ -46,9 +46,11 @@ class Settings(BaseSettings):
     # (~7 s verify); 16384 → 83% GPU (spills to CPU). 0 = don't send (Ollama default).
     vlm_num_ctx: int = 8192
 
-    # Frame extraction (Stage 2 input)
-    frames_per_clip: int = 5
-    frame_max_dim: int = 640
+    # Frame extraction (Stage 2 input). VLM-primary scans run on a fast cadence,
+    # so fewer + smaller frames per clip = much less VLM work per scan (the 5×640
+    # default made each verify slow). 3×480 still shows the gesture across the clip.
+    frames_per_clip: int = 3
+    frame_max_dim: int = 480
     frame_jpeg_quality: int = 85
     # ffmpeg binary for clip cutting. Bare "ffmpeg" works when it's on PATH; set
     # an absolute path when the node runs as a service without ffmpeg on PATH
