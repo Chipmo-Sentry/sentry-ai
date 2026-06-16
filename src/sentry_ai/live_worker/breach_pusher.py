@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import math
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,11 @@ log = get_logger("sentry_ai.live_worker.breach_pusher")
 # One worker → at most one cut+VLM at a time (the node has a single GPU/Ollama).
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="breach")
 _POST_TIMEOUT_SEC = 15.0
+# VLM-primary scans fire on a fast cadence (~3s) but the single GPU takes longer
+# per clip — drop ticks while one is in flight instead of queueing them up
+# unboundedly. This throttles the scan rate to the GPU's real throughput.
+_busy_lock = threading.Lock()
+_busy = False
 # Mirror of the backend's derive_alert_level "ignore" gate so the node never
 # pushes a verdict the backend would just drop.
 _IGNORE_CONF = 0.30
@@ -58,6 +64,11 @@ def submit_breach(
 
     if resolve_breach_mode() != "node_push":
         return
+    global _busy
+    with _busy_lock:
+        if _busy:
+            return  # a scan is still cutting+VLM on the single GPU — skip this tick
+        _busy = True
     _executor.submit(
         _handle,
         mediamtx_path,
@@ -96,6 +107,10 @@ def _handle(
         )
     except Exception:  # noqa: BLE001 — a breach failure must never kill the worker
         log.exception("breach_push.failed", mediamtx_path=mediamtx_path, person_id=person_id)
+    finally:
+        global _busy
+        with _busy_lock:
+            _busy = False
 
 
 def _clip_window(

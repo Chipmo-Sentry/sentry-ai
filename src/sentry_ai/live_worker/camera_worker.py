@@ -113,6 +113,12 @@ class CameraWorker:
         # sustained breach we hand off to breach_pusher (cut + VLM + POST to the
         # backend) on its own worker — this frame loop never blocks on it.
         _s = get_settings()
+        # VLM-primary scan cadence: every N seconds, hand the most-suspicious
+        # PRESENT person to the VLM (cut + verify + POST) and let the AI decide —
+        # the behaviour engine no longer GATES this, it just prioritises who to
+        # scan. breach_pusher drops ticks while the GPU is busy.
+        self._scan_interval = max(0.5, _s.live_scan_interval_sec)
+        self._last_scan = 0.0
         self._alert_threshold_pct = (
             alert_threshold_pct if alert_threshold_pct is not None else _s.live_alert_threshold_pct
         )
@@ -348,6 +354,7 @@ class CameraWorker:
 
         # v2 behavior engine per tracked person → risk_pct + level + state + color
         tracks_payload: list[TrackPayload] = []
+        best_scan: tuple[float, int, ScoreResult] | None = None
         for t in tracked:
             person_h = max(1.0, t.box[3] - t.box[1])
             result = self._scorer.score(
@@ -404,8 +411,11 @@ class CameraWorker:
                 ),
             )
 
-            # Node-push: detect a sustained breach for this person → hand off.
-            self._maybe_breach(t.tracker_id, risk_pct, result, now)
+            # VLM-primary: remember the most-suspicious PRESENT person; the
+            # periodic scan below hands them to the VLM (the AI decides — the
+            # behaviour engine no longer GATES alerts, it only prioritises).
+            if best_scan is None or risk_pct > best_scan[0]:
+                best_scan = (risk_pct, t.tracker_id, result)
 
         # Periodic stale-track cleanup (~once per second @ 5 FPS)
         if self._frames_total - self._last_cleanup_frame > 30:
@@ -416,6 +426,13 @@ class CameraWorker:
             ]
             for tid in stale_breach:
                 del self._breach_state[tid]
+
+        # VLM-primary periodic scan: every scan_interval, hand the most-suspicious
+        # PRESENT person to the VLM. breach_pusher skips the tick if the GPU is
+        # still busy on the previous scan (throttles to real VLM throughput).
+        if best_scan is not None and now - self._last_scan >= self._scan_interval:
+            self._last_scan = now
+            self._submit_breach(best_scan[1], best_scan[0], best_scan[2])
 
         payload = FrameMetadata(
             camera_id=self.camera_id,

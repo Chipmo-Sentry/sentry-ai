@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     # backend's per-camera risk_threshold default; yellow band). Sustained for
     # sustain_sec, then debounced per person for cooldown_sec.
     live_alert_threshold_pct: float = 11.0
+    # VLM-primary detection (ADR pivot 2026-06-16): instead of the geometric
+    # behaviour engine GATING the VLM, scan a present person with the VLM on this
+    # cadence and let the AI decide. The behaviour engine now only prioritises
+    # WHICH person to scan + drives the overlay. Throttled by the single GPU
+    # worker (a scan in flight skips the next ticks), so this is a target, not a
+    # guarantee — effective rate ≈ VLM latency when busy.
+    live_scan_interval_sec: float = 3.0
     live_breach_sustain_sec: float = 1.0
     live_breach_cooldown_sec: float = 30.0
     # Wait this long after the breach before cutting, so the clip catches the act
