@@ -636,23 +636,29 @@ class BehaviorScorer:
             else:
                 _add("crouch", self.weights.get("crouch", 0.0), "Бөхийх")
 
-        # 5. Wrist to torso — wrist held near hip line; only when holding.
-        if state.holding and hip_cy is not None:
-            near_torso = False
-            for wrist in (l_wrist, r_wrist):
-                if not _kp_valid(wrist):
-                    continue
-                if abs(wrist[1] - hip_cy) < person_h * self._dp("wrist_to_torso", "frac", 0.15):
-                    near_torso = True
-                    break
-            if near_torso:
+        # 5. Hand to torso/chest — a wrist brought INTO the torso box: between the
+        # shoulders horizontally, and from the shoulder line down to the waist
+        # vertically. Catches chest / inner-pocket / under-arm concealment that's
+        # visible on upper-body (desk/overhead) cameras where the hips are off
+        # frame. NOT gated on `holding`: item detection is unreliable, and a hand
+        # deliberately brought between the shoulders is itself the signal — arms
+        # resting at the sides sit at/outside the shoulder x-edges, so they don't
+        # match. Sustained via concealment_frames + cadence to avoid flicker.
+        if shoulder_cy is not None and _kp_valid(l_shoulder) and _kp_valid(r_shoulder):
+            sx_lo, sx_hi = sorted((float(l_shoulder[0]), float(r_shoulder[0])))
+            torso_bot = hip_cy if hip_cy is not None else shoulder_cy + person_h * 0.5
+            in_torso = any(
+                _kp_valid(w) and sx_lo < w[0] < sx_hi and shoulder_cy < w[1] < torso_bot
+                for w in (l_wrist, r_wrist)
+            )
+            if in_torso:
                 state.concealment_frames += 1
                 cadence = max(1, int(self._dp("wrist_to_torso", "cadence", 8.0)))
                 if state.concealment_frames % cadence == 0:
                     _add(
                         "wrist_to_torso",
                         self.weights.get("wrist_to_torso", 0.0),
-                        f"Хувцас доор нуух ({state.concealment_frames}f)",
+                        f"Гараа биедээ нуух ({state.concealment_frames}f)",
                     )
             else:
                 state.concealment_frames = max(0, state.concealment_frames - 1)

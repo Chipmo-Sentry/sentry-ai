@@ -272,7 +272,7 @@ def test_pickup_then_wrist_awards_sequence_bonus() -> None:
     _pick_up(scorer)
     # 8 near-torso frames → one wrist_to_torso event (fires on the 8th).
     k = _neutral()
-    k[L_WRIST] = (200, 300, 1.0)  # at hip Y, far in X (no pocket)
+    k[L_WRIST] = (100, 200, 1.0)  # chest: between shoulders, below shoulder line (no pocket)
     last = None
     for _ in range(8):
         last = scorer.score(1, k, PERSON_H, items=[])
@@ -284,7 +284,7 @@ def test_concealment_sequence_is_critical_alert() -> None:
     scorer = BehaviorScorer()
     _pick_up(scorer)
     k = _neutral()
-    k[L_WRIST] = (200, 300, 1.0)
+    k[L_WRIST] = (100, 200, 1.0)  # chest (between shoulders) → wrist_to_torso
     for _ in range(8):  # → wrist_to_torso event
         scorer.score(1, k, PERSON_H, items=[])
     # Now hide in the pocket (conceal_hide finisher).
