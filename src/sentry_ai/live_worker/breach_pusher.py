@@ -218,6 +218,7 @@ async def _cut_verify_push(
         base_url=settings.ollama_base_url,
         timeout_sec=settings.inference_timeout_sec,
         num_ctx=settings.vlm_num_ctx,
+        num_predict=settings.vlm_num_predict,
     )
     _verify_t0 = time.monotonic()
     try:

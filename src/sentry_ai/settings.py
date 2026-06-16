@@ -45,12 +45,23 @@ class Settings(BaseSettings):
     # 8 GB RTX 4060 co-resident with the live YOLO workers: 8192 → 100% GPU offload
     # (~7 s verify); 16384 → 83% GPU (spills to CPU). 0 = don't send (Ollama default).
     vlm_num_ctx: int = 8192
+    # Cap the VLM's output tokens (Ollama `options.num_predict`). Measured on the
+    # 8 GB 4060: an uncapped verify decodes ~300 Mongolian-reasoning tokens at
+    # ~44 t/s ≈ 7 s of pure decode on top of the ~13 s vision prefill. Cyrillic
+    # tokenises heavily, so a long `reasoning` field is expensive. The prompt now
+    # asks for a <10-word reasoning, so ~70 tokens is typical; 128 is a generous
+    # ceiling that won't truncate the JSON (a cut-off close brace → parse retry →
+    # a wasted full VLM call). 0 = uncapped (Ollama default).
+    vlm_num_predict: int = 128
 
     # Frame extraction (Stage 2 input). VLM-primary scans run on a fast cadence,
-    # so fewer + smaller frames = far fewer vision tokens = faster VLM. Measured:
-    # 5×640 and 3×480 were both ~45-50s on the 8 GB 4060 (camera contention ruled
-    # out). 1×320 is the minimal-token test to see if the VLM is token-bound vs
-    # just too heavy for this GPU. Raise once we know where the latency sits.
+    # so fewer frames = fewer vision tokens = faster VLM. MEASURED on the 8 GB 4060
+    # (Ollama, single 320px frame): vision prefill ≈ 1600 tokens / ~13 s regardless
+    # of frame_max_dim — 224px gave 1631 tokens, 320px 1603, 512px 1603. Qwen3-VL's
+    # processor upscales to its min_pixels floor, so SHRINKING the JPEG no longer
+    # cuts tokens: frame_max_dim is bottomed out at 320. The only ways left to cut
+    # vision tokens are a server that exposes min/max_pixels (vLLM) or a lighter
+    # VLM. Keep 1×320 here; the remaining win is on the text side (prompt + output).
     frames_per_clip: int = 1
     frame_max_dim: int = 320
     frame_jpeg_quality: int = 85
