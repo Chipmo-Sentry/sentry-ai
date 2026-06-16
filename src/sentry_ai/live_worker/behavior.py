@@ -541,9 +541,20 @@ class BehaviorScorer:
         if _kp_valid(l_eye) and _kp_valid(r_eye):
             face_cx = (l_eye[0] + r_eye[0]) / 2
 
+        shoulder_cy: float | None = None
+        if _kp_valid(l_shoulder) and _kp_valid(r_shoulder):
+            shoulder_cy = (l_shoulder[1] + r_shoulder[1]) / 2
+
+        # Hip line. Desk/overhead cameras crop the hips off-frame, so the hip
+        # keypoints are never valid → pocket/wrist_to_torso/crouch could NEVER
+        # fire (concealment was undetectable on upper-body views). Fall back to a
+        # waist line estimated below the shoulders from body proportions, so a
+        # hand moving toward the lower body still registers.
         hip_cy: float | None = None
         if _kp_valid(l_hip) and _kp_valid(r_hip):
             hip_cy = (l_hip[1] + r_hip[1]) / 2
+        elif shoulder_cy is not None:
+            hip_cy = shoulder_cy + person_h * self._dp("concealment", "hip_estimate_frac", 0.5)
 
         delta = 0.0
         reasons: list[str] = []
@@ -577,9 +588,14 @@ class BehaviorScorer:
                 if not _kp_valid(wrist):
                     continue
                 matched: str | None = None
+                # Tolerance: count the wrist NEAR the item, not strictly inside.
+                # The hand grips an item's edge and item detection runs at ~2 fps
+                # (slightly stale box), so strict containment made item_pickup
+                # fire far too rarely → holding never set → concealment muted.
+                m = person_h * self._dp("item_pickup", "margin_frac", 0.08)
                 for it in items:
                     ix1, iy1, ix2, iy2 = it.box
-                    if ix1 < wrist[0] < ix2 and iy1 < wrist[1] < iy2:
+                    if ix1 - m < wrist[0] < ix2 + m and iy1 - m < wrist[1] < iy2 + m:
                         matched = it.label
                         break
                 if matched is not None:
@@ -647,23 +663,26 @@ class BehaviorScorer:
             if bags and self._wrist_in_any(l_wrist, r_wrist, [b.box for b in bags]):
                 _add("bag_interaction", self.weights.get("bag_interaction", 0.0), "Гар уут руу")
 
-        # 7. Pocket interaction — wrist at a hip keypoint while holding.
-        if state.holding:
+        # 7. Pocket interaction — wrist near a hip while holding. Real hip
+        # keypoints win; when they're off-frame (upper-body cameras) fall back to
+        # an estimated hip point below each shoulder at the waist line (hip_cy).
+        if state.holding and hip_cy is not None:
             radius = person_h * self._dp("pocket_interaction", "radius_frac", 0.12)
-            for hip in (l_hip, r_hip):
-                if not _kp_valid(hip):
-                    continue
-                hit = False
-                for wrist in (l_wrist, r_wrist):
-                    if (
-                        _kp_valid(wrist)
-                        and math.dist(
-                            (float(wrist[0]), float(wrist[1])), (float(hip[0]), float(hip[1]))
-                        )
-                        < radius
-                    ):
-                        hit = True
-                        break
+            hip_points: list[tuple[float, float]] = []
+            if _kp_valid(l_hip):
+                hip_points.append((float(l_hip[0]), float(l_hip[1])))
+            if _kp_valid(r_hip):
+                hip_points.append((float(r_hip[0]), float(r_hip[1])))
+            if not hip_points and _kp_valid(l_shoulder) and _kp_valid(r_shoulder):
+                hip_points = [
+                    (float(l_shoulder[0]), hip_cy),
+                    (float(r_shoulder[0]), hip_cy),
+                ]
+            for hx, hy in hip_points:
+                hit = any(
+                    _kp_valid(w) and math.dist((float(w[0]), float(w[1])), (hx, hy)) < radius
+                    for w in (l_wrist, r_wrist)
+                )
                 if hit:
                     _add(
                         "pocket_interaction",
