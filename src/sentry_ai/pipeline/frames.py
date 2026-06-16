@@ -8,10 +8,13 @@ from pathlib import Path
 import ffmpeg
 from PIL import Image
 
+from sentry_ai.settings import get_settings
+
 
 def _probe_duration_sec(clip_path: Path) -> float:
-    """Run ffprobe synchronously to get duration in seconds."""
-    info = ffmpeg.probe(str(clip_path))
+    """Run ffprobe synchronously to get duration in seconds. Uses the configured
+    ffprobe binary (cmd=) — bare "ffprobe" isn't on the service PATH on the node."""
+    info = ffmpeg.probe(str(clip_path), cmd=get_settings().ffprobe_path)
     fmt = info.get("format", {})
     duration = float(fmt.get("duration", 0.0))
     if duration <= 0.0:
@@ -20,12 +23,18 @@ def _probe_duration_sec(clip_path: Path) -> float:
 
 
 def _extract_one_frame_sync(clip_path: Path, timestamp_sec: float, out_path: Path) -> None:
-    """Synchronous ffmpeg call — to be awaited via asyncio.to_thread."""
+    """Synchronous ffmpeg call — to be awaited via asyncio.to_thread. Uses the
+    configured ffmpeg binary (cmd=) — bare "ffmpeg" isn't on the service PATH."""
     (
         ffmpeg.input(str(clip_path), ss=timestamp_sec)
         .output(str(out_path), vframes=1, format="image2", vcodec="mjpeg")
         .overwrite_output()
-        .run(capture_stdout=True, capture_stderr=True, quiet=True)
+        .run(
+            cmd=get_settings().ffmpeg_path,
+            capture_stdout=True,
+            capture_stderr=True,
+            quiet=True,
+        )
     )
 
 

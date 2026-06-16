@@ -1,6 +1,7 @@
 """Application settings."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,6 +54,22 @@ class Settings(BaseSettings):
     # an absolute path when the node runs as a service without ffmpeg on PATH
     # (e.g. FFMPEG_PATH=D:/ChipmoSentryAI/bin/ffmpeg.exe).
     ffmpeg_path: str = "ffmpeg"
+    # ffprobe binary (clip-duration probe in pipeline/frames.py). Optional override;
+    # when unset it's derived from ffmpeg_path so setting FFMPEG_PATH alone is enough
+    # (.../ffmpeg.exe → .../ffprobe.exe). ffprobe ships alongside ffmpeg.
+    ffprobe_path_override: str = ""
+
+    @property
+    def ffprobe_path(self) -> str:
+        """Resolved ffprobe binary: explicit override, else derived from
+        ffmpeg_path (.../ffmpeg.exe → .../ffprobe.exe), else bare "ffprobe"."""
+        if self.ffprobe_path_override:
+            return self.ffprobe_path_override
+        fp = self.ffmpeg_path
+        if fp and fp != "ffmpeg" and ("/" in fp or "\\" in fp):
+            p = Path(fp)
+            return str(p.with_name(p.name.replace("ffmpeg", "ffprobe")))
+        return "ffprobe"
 
     # Backend integration (sentry-ai → sentry-backend)
     sentry_backend_url: str = "http://localhost:8000"
