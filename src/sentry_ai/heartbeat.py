@@ -221,6 +221,13 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
     vlm = _vlm_status(client, settings, effective_provider)
     if vlm is not None:
         payload["vlm"] = vlm
+        # On WDDM, per-process VRAM (sentry_vram_mb) is N/A → 0, leaving the chart's
+        # "Sentry VRAM" line flat at zero (looks like the AI uses no GPU memory).
+        # When NVML couldn't measure it, surface the VLM's GPU VRAM (from Ollama)
+        # instead so the dashed line on the VRAM chart RISES during a verify. On a
+        # real per-process box (Linux) the measured value is non-zero → left as-is.
+        if vlm.get("loaded") and not payload.get("sentry_vram_mb"):
+            payload["sentry_vram_mb"] = vlm.get("vram_mb")
     return payload
 
 
