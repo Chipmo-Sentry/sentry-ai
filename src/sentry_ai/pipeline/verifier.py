@@ -54,7 +54,7 @@ async def verify_clip(
     runtime_config.record_vlm_verify(latency_ms)
     return (
         VLMOutput(
-            category=Category.other,
+            actions=[Category.other],
             confidence=0.0,
             reasoning=f"VLM parse failed after retries: {last_err}",
         ),

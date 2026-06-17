@@ -42,7 +42,7 @@ def _patched_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     async def fake_verify_clip(*, clip_path, provider, store_context=None):
         calls["store_context"] = store_context
-        out = VLMOutput(category=Category.browsing, confidence=0.9, reasoning="зүгээр үзэж байв")
+        out = VLMOutput(actions=[Category.browsing], confidence=0.9, reasoning="зүгээр үзэж байв")
         return out, 12, 5
 
     monkeypatch.setattr(verify_mod, "verify_clip", fake_verify_clip)
