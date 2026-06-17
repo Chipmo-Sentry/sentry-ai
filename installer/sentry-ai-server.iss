@@ -1,4 +1,4 @@
-; Inno Setup script for the Chipmo Sentry AI server.
+; Inno Setup script for the Sentry AI server.
 ; Build:  iscc /DAppVersion=0.1.0 installer\sentry-ai-server.iss
 ; (CI passes the version from the git tag.)
 ;
@@ -13,7 +13,7 @@
   #define AppVersion "0.0.0"
 #endif
 
-#define AppName "Chipmo Sentry AI Server"
+#define AppName "Sentry AI Server"
 #define AppPublisher "Chipmo"
 #define AppId "{{A1C7E0D2-AI55-4B10-9E33-CHIPMOSENTRYAI}"
 
@@ -22,8 +22,8 @@ AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\Chipmo Sentry AI
-DefaultGroupName=Chipmo Sentry AI
+DefaultDirName={autopf}\Sentry AI
+DefaultGroupName=Sentry AI
 DisableProgramGroupPage=yes
 DisableDirPage=no
 OutputDir=..\dist
@@ -57,7 +57,7 @@ Source: "bin\cloudflared.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "bin\nssm.exe";        DestDir: "{app}\bin"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Chipmo Sentry AI - Status"; Filename: "powershell.exe"; \
+Name: "{group}\Sentry AI - Status"; Filename: "powershell.exe"; \
   Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\server-control.ps1"" status"
 Name: "{group}\Pairing - status"; Filename: "powershell.exe"; \
   Parameters: "-NoExit -ExecutionPolicy Bypass -File ""{app}\scripts\pairing.ps1"" status"

@@ -96,7 +96,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Chipmo Sentry AI",
+        title="Sentry AI",
         version=__version__,
         lifespan=lifespan,
     )
