@@ -268,6 +268,9 @@ async def _cut_verify_push(
 
     payload: dict[str, Any] = {
         "camera_id": mediamtx_path,
+        # Multi-label: every action detected in the clip. `category` stays as the
+        # primary (most-severe) for backward compat (level/analytics/Telegram/RAG).
+        "actions": [a.value for a in output.actions],
         "category": output.category.value,
         "confidence": output.confidence,
         "reasoning": output.reasoning,
