@@ -40,6 +40,82 @@ class ProviderHealth:
 _health = ProviderHealth(effective=None, ready=False, error=None)
 
 
+# === Per-node YOLO + scan/VLM tuning (central control) ===
+# The node polls these from /api/v1/ai-nodes/config and hot-applies them WITHOUT a
+# restart: the camera read-loop reads frame_skip live, _process_frame syncs the
+# YOLO conf + item cadence + scan interval each frame, and the verify path reads
+# frames_per_clip/frame_max_dim per breach. Any field left None means "the call
+# site keeps its own default" (the node's .env / hardcoded value), so an older
+# backend that doesn't send these keys changes nothing.
+
+
+@dataclass(frozen=True)
+class DetectionConfig:
+    frame_skip: int | None = None
+    person_conf: float | None = None
+    item_conf: float | None = None
+    item_every_n: int | None = None
+    scan_interval_sec: float | None = None
+    frames_per_clip: int | None = None
+    frame_max_dim: int | None = None
+
+
+_detection: DetectionConfig | None = None
+
+
+def _as_int(v: object) -> int | None:
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _as_float(v: object) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def set_central_detection(cfg: dict[str, object] | None) -> bool:
+    """Called by the config poller after each node-config fetch. Coerces the raw
+    JSON into a DetectionConfig, dropping any non-numeric value so a bad DB entry
+    can never crash the hot path. Returns True if the effective config CHANGED
+    (so the caller can log it once)."""
+    global _detection
+    if not isinstance(cfg, dict):
+        return False
+    new = DetectionConfig(
+        frame_skip=_as_int(cfg.get("frame_skip")),
+        person_conf=_as_float(cfg.get("person_conf")),
+        item_conf=_as_float(cfg.get("item_conf")),
+        item_every_n=_as_int(cfg.get("item_every_n")),
+        scan_interval_sec=_as_float(cfg.get("scan_interval_sec")),
+        frames_per_clip=_as_int(cfg.get("frames_per_clip")),
+        frame_max_dim=_as_int(cfg.get("frame_max_dim")),
+    )
+    with _lock:
+        changed = new != _detection
+        _detection = new
+    return changed
+
+
+def get_detection() -> DetectionConfig | None:
+    with _lock:
+        return _detection
+
+
+def resolve_frames_per_clip(default: int) -> int:
+    """Keyframes per VLM scan — the central per-node value if set, else the
+    .env/settings default. Read by the verify path on each breach."""
+    cfg = get_detection()
+    if cfg is not None and cfg.frames_per_clip is not None:
+        return max(1, cfg.frames_per_clip)
+    return default
+
+
+def resolve_frame_max_dim(default: int) -> int:
+    """Max keyframe edge (px) sent to the VLM — central per-node value or default."""
+    cfg = get_detection()
+    if cfg is not None and cfg.frame_max_dim is not None:
+        return max(64, cfg.frame_max_dim)
+    return default
+
+
 def set_central_provider(name: str | None) -> None:
     """Called by the config poller after each successful node-config fetch."""
     global _central_provider

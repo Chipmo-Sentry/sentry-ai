@@ -76,7 +76,18 @@ def _camera_health(workers: list[dict[str, Any]]) -> list[dict[str, object]]:
             status = "error"
         else:
             status = "stalled"
-        cams.append({"camera_id": str(w.get("camera_id") or ""), "fps": fps, "status": status})
+        row: dict[str, object] = {
+            "camera_id": str(w.get("camera_id") or ""),
+            "fps": fps,
+            "status": status,
+            "persons": int(w.get("persons") or 0),
+        }
+        # Effective frame_skip (the central per-node value the worker actually
+        # applied). Only forward when >=1 so it satisfies the backend schema.
+        skip = int(w.get("frame_skip") or 0)
+        if skip >= 1:
+            row["frame_skip"] = skip
+        cams.append(row)
     return cams
 
 

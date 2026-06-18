@@ -18,17 +18,22 @@ async def verify_clip(
 ) -> tuple[VLMOutput, int, int]:
     """Run Stage 2 on a clip. Returns (output, latency_ms, frames_used)."""
     settings = get_settings()
+    from sentry_ai.runtime_config import resolve_frame_max_dim, resolve_frames_per_clip
+
+    # frames_per_clip + frame_max_dim are operator-tunable per node (central
+    # control); the resolved value wins over the .env default so a superadmin edit
+    # changes how many frames / what resolution the VLM sees on the NEXT breach.
+    frames_per_clip = resolve_frames_per_clip(settings.frames_per_clip)
+    frame_max_dim = resolve_frame_max_dim(settings.frame_max_dim)
 
     frames = await extract_keyframes(
         clip_path,
-        count=settings.frames_per_clip,
-        max_dim=settings.frame_max_dim,
+        count=frames_per_clip,
+        max_dim=frame_max_dim,
         quality=settings.frame_jpeg_quality,
     )
 
-    prompt = render_prompt(
-        "verify_v1.j2", store_context=store_context, frame_count=settings.frames_per_clip
-    )
+    prompt = render_prompt("verify_v1.j2", store_context=store_context, frame_count=frames_per_clip)
 
     from sentry_ai import runtime_config
 

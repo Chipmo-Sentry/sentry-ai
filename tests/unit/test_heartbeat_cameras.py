@@ -29,7 +29,22 @@ def _worker(**overrides: Any) -> dict[str, Any]:
 
 def test_running_with_fps_is_ok() -> None:
     cams = _camera_health([_worker()])
-    assert cams == [{"camera_id": "cam-1", "fps": 4.8, "status": "ok"}]
+    # persons defaults to 0; frame_skip is omitted when the worker doesn't report
+    # a value >= 1 (old node / not yet inferred).
+    assert cams == [{"camera_id": "cam-1", "fps": 4.8, "status": "ok", "persons": 0}]
+
+
+def test_forwards_effective_frame_skip_and_persons() -> None:
+    # The effective (live) frame_skip and latest person count are forwarded so the
+    # backend's per-camera CameraHealth shows real YOLO numbers.
+    cams = _camera_health([_worker(frame_skip=7, persons=3)])
+    assert cams[0]["frame_skip"] == 7
+    assert cams[0]["persons"] == 3
+
+
+def test_frame_skip_below_one_is_omitted() -> None:
+    cams = _camera_health([_worker(frame_skip=0, persons=0)])
+    assert "frame_skip" not in cams[0]
 
 
 def test_running_zero_fps_no_error_is_stalled() -> None:

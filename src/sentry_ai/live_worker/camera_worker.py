@@ -26,6 +26,7 @@ from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
 from sentry_ai.live_worker.yolo_det import Item, YoloItemRunner
 from sentry_ai.live_worker.yolo_runner import YoloPoseRunner
 from sentry_ai.logging_setup import get_logger
+from sentry_ai.runtime_config import get_detection
 from sentry_ai.settings import get_settings
 
 log = get_logger("sentry_ai.live_worker.camera")
@@ -68,7 +69,13 @@ class CameraWorker:
     ) -> None:
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
+        # Constructor frame_skip is the FALLBACK; the live value comes from the
+        # central per-node config (runtime_config) and is read fresh each frame so
+        # an operator edit in superadmin takes effect without restarting the worker.
         self.frame_skip = max(1, frame_skip)
+        # The frame_skip actually applied on the latest read (effective value, for
+        # the yolo_stats log + heartbeat). Starts at the constructor fallback.
+        self._active_frame_skip = self.frame_skip
         # Per-camera breach threshold (0-100) from the backend. None → fall back to
         # the node-global default. This is THE threshold the node fires breaches at;
         # before this the backend's per-camera risk_threshold was ignored entirely.
@@ -89,6 +96,7 @@ class CameraWorker:
         self._frames_total = 0  # frames READ off RTSP (pre frame_skip)
         self._frames_processed = 0  # frames that PASSED frame_skip → YOLO ran
         self._detections_total = 0
+        self._persons_this_frame = 0  # persons in the latest analyzed frame (for heartbeat)
         self._last_stats_log = 0.0  # monotonic ts of last yolo_stats log
         self._capture_times: deque[float] = deque(maxlen=200)  # for fps_capture
         self._inference_times: deque[float] = deque(maxlen=200)  # for fps_inference
@@ -182,6 +190,18 @@ class CameraWorker:
     @property
     def detections_total(self) -> int:
         return self._detections_total
+
+    @property
+    def effective_frame_skip(self) -> int:
+        """The frame_skip actually applied on the latest read (live central value
+        or the constructor fallback) — surfaced in /v1/live/status for the heartbeat."""
+        return self._active_frame_skip
+
+    @property
+    def persons_this_frame(self) -> int:
+        """Persons in the latest analyzed frame — surfaced for the heartbeat so the
+        YOLO stage shows real per-camera numbers."""
+        return self._persons_this_frame
 
     @property
     def last_error(self) -> str | None:
@@ -280,7 +300,10 @@ class CameraWorker:
                 self._frames_total += 1
                 self._capture_times.append(time.monotonic())
 
-                if self._frames_total % self.frame_skip != 0:
+                # Effective frame_skip from the central per-node config (live), so a
+                # superadmin edit changes the analyzed FPS without a worker restart.
+                self._active_frame_skip = self._effective_frame_skip()
+                if self._frames_total % self._active_frame_skip != 0:
                     continue
 
                 try:
@@ -311,11 +334,41 @@ class CameraWorker:
         log.info("camera.open_ok", camera_id=self.camera_id)
         return cap
 
+    def _effective_frame_skip(self) -> int:
+        """Live frame_skip: the central per-node config wins, else the constructor
+        fallback. Read fresh every captured frame so an edit applies immediately."""
+        cfg = get_detection()
+        if cfg is not None and cfg.frame_skip is not None:
+            return max(1, cfg.frame_skip)
+        return self.frame_skip
+
+    def _sync_detection_config(self) -> None:
+        """Apply the central per-node YOLO/scan tuning to this running worker.
+        Cheap (a few attribute writes) and called once per analyzed frame; the
+        YOLO runners read `conf` on every predict, so updating it here takes effect
+        on the NEXT inference with no model reload. Unset fields keep their own
+        constructor/settings default."""
+        cfg = get_detection()
+        if cfg is None:
+            return
+        if cfg.person_conf is not None and self._yolo is not None:
+            self._yolo.conf = cfg.person_conf
+        if cfg.item_conf is not None and self._item_runner is not None:
+            self._item_runner.conf = cfg.item_conf
+        if cfg.item_every_n is not None:
+            self._item_every_n = max(1, cfg.item_every_n)
+        if cfg.scan_interval_sec is not None:
+            self._scan_interval = max(0.5, cfg.scan_interval_sec)
+
     def _process_frame(self, frame_bgr: NDArray[np.uint8]) -> None:
         assert self._yolo is not None
         assert self._item_runner is not None
         assert self._tracker is not None
         assert self._scorer is not None
+
+        # Pull the latest central per-node config onto this worker (conf / item
+        # cadence / scan interval). frame_skip is applied in the read loop.
+        self._sync_detection_config()
 
         h, w = frame_bgr.shape[:2]
         detections = self._yolo.detect_persons(frame_bgr)
@@ -324,6 +377,7 @@ class CameraWorker:
         self._inference_times.append(now)
         self._frames_processed += 1
         self._detections_total += len(detections)
+        self._persons_this_frame = len(detections)
 
         # Throttled YOLO-filter heartbeat. captured vs processed ≈ frame_skip
         # confirms the skip gate; persons>0 when someone is in view confirms the
@@ -335,11 +389,11 @@ class CameraWorker:
                 camera_id=self.camera_id,
                 frames_captured=self._frames_total,
                 frames_processed=self._frames_processed,
-                frame_skip=self.frame_skip,
+                frame_skip=self._active_frame_skip,
                 persons_this_frame=len(detections),
                 tracks_this_frame=len(tracked),
                 detections_total=self._detections_total,
-                yolo_conf=self.yolo_conf,
+                yolo_conf=round(self._yolo.conf, 2),
                 fps_capture=round(self.fps_capture, 1),
                 fps_inference=round(self.fps_inference, 1),
             )
