@@ -123,6 +123,7 @@ class BehaviorConfigPoller:
         from sentry_ai.providers.factory import resolve_provider_name
         from sentry_ai.runtime_config import (
             set_central_breach_mode,
+            set_central_detection,
             set_central_provider,
             set_provider_health,
         )
@@ -147,6 +148,21 @@ class BehaviorConfigPoller:
         # unknown values, so a bad DB value can't silently disable alerting.
         if isinstance(breach_mode, str) and breach_mode:
             set_central_breach_mode(breach_mode)
+        # Per-node YOLO + scan/VLM tuning (central control). Hot-applied with NO
+        # restart: camera workers read these live (frame_skip / conf / cadence /
+        # scan interval) and the verify path reads frames_per_clip / frame_max_dim
+        # per breach. Bad values are dropped inside set_central_detection.
+        if set_central_detection(cfg) and isinstance(cfg, dict):
+            log.info(
+                "config_poller.detection_applied",
+                frame_skip=cfg.get("frame_skip"),
+                person_conf=cfg.get("person_conf"),
+                item_conf=cfg.get("item_conf"),
+                item_every_n=cfg.get("item_every_n"),
+                scan_interval_sec=cfg.get("scan_interval_sec"),
+                frames_per_clip=cfg.get("frames_per_clip"),
+                frame_max_dim=cfg.get("frame_max_dim"),
+            )
         # Readiness: which provider will verify actually use, and is its model up?
         effective = resolve_provider_name(None)
         ready, error, transient = _check_provider_ready(effective, settings)

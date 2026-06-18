@@ -91,6 +91,11 @@ class LiveWorkerStatus(BaseModel):
     fps_inference: float = Field(description="YOLO+tracker FPS after frame_skip")
     frames_total: int
     detections_total: int
+    # Effective (live) frame_skip applied on the latest read + persons in the
+    # latest analyzed frame — surfaced so the heartbeat reports real per-camera
+    # YOLO numbers and so a superadmin frame_skip edit is visibly applied.
+    frame_skip: int = 3
+    persons: int = 0
     last_error: str | None = None
 
 

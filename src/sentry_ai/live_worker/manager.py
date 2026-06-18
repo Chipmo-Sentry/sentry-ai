@@ -114,6 +114,8 @@ class LiveWorkerManager:
                     fps_inference=round(w.fps_inference, 2),
                     frames_total=w.frames_total,
                     detections_total=w.detections_total,
+                    frame_skip=w.effective_frame_skip,
+                    persons=w.persons_this_frame,
                     last_error=w.last_error,
                 )
                 for w in self._workers.values()
