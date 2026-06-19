@@ -47,6 +47,13 @@ async def verify_clip(
             latency_ms = int((time.perf_counter() - started) * 1000)
             # Record the GPU run so the dashboard shows the VLM's activity history.
             runtime_config.record_vlm_verify(latency_ms)
+            runtime_config.record_vlm_verdict(
+                category=output.category.value,
+                confidence=output.confidence,
+                latency_ms=latency_ms,
+                frames_used=len(frames),
+                parsed=True,
+            )
             return output, latency_ms, len(frames)
         except VLMParseError as e:
             last_err = e
@@ -57,6 +64,16 @@ async def verify_clip(
     # ran on the GPU, so still count it.
     latency_ms = int((time.perf_counter() - started) * 1000)
     runtime_config.record_vlm_verify(latency_ms)
+    # Capture the RAW unparseable output — the single most useful diagnostic for
+    # "why does the VLM keep failing" on the stage page.
+    runtime_config.record_vlm_verdict(
+        category="other",
+        confidence=0.0,
+        latency_ms=latency_ms,
+        frames_used=len(frames),
+        parsed=False,
+        raw=(last_err.raw if last_err is not None else None),
+    )
     return (
         VLMOutput(
             actions=[Category.other],
