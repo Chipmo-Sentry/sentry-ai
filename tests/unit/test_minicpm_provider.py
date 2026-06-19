@@ -26,7 +26,7 @@ async def test_provider_parses_valid_response(ollama: OllamaClient) -> None:
                         "role": "assistant",
                         "content": json.dumps(
                             {
-                                "category": "cart_pickup",
+                                "actions": ["cart_pickup"],
                                 "confidence": 0.72,
                                 "reasoning": "Бараа авч сагсанд тавьсан, эргэж харсан.",
                             }
@@ -67,7 +67,7 @@ async def test_provider_raises_on_invalid_schema(ollama: OllamaClient) -> None:
                     "message": {
                         "role": "assistant",
                         "content": json.dumps(
-                            {"category": "INVALID", "confidence": 0.5, "reasoning": "ok"}
+                            {"actions": ["INVALID"], "confidence": 0.5, "reasoning": "ok"}
                         ),
                     }
                 },

@@ -26,7 +26,7 @@ async def test_qwen3_parses_valid_response(ollama: OllamaClient) -> None:
                         "role": "assistant",
                         "content": json.dumps(
                             {
-                                "category": "pocket_conceal",
+                                "actions": ["pocket_conceal"],
                                 "confidence": 0.88,
                                 "reasoning": "Хүн бараа авч халаас руу нуун, эргэж харсан.",
                             }
