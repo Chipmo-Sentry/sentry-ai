@@ -70,9 +70,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     start_heartbeat()
 
+    # Node diagnostics push — rich per-stage diag (worker errors, VLM verdicts +
+    # raw-on-failure) to the backend for the stage diagnostics console (docs/26).
+    from sentry_ai.diag import start_diag, stop_diag
+
+    start_diag()
+
     yield
 
     log.info("stopping")
+    stop_diag()
     stop_heartbeat()
     get_manager().stop_all()
     await close_client()

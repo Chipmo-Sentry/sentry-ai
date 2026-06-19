@@ -190,6 +190,47 @@ def get_vlm_activity() -> dict[str, object]:
     return {"count": count, "last_ago_sec": ago, "last_latency_ms": lat}
 
 
+# --- VLM verdict ring buffer (diagnostics console — docs/26) ----------------
+# The single most useful VLM diagnostic: the actual recent verdicts AND, on a
+# parse failure, the raw model output that couldn't be parsed. Surfaced via the
+# diag channel so an operator reads "why is the VLM failing" off the stage page.
+from collections import deque  # noqa: E402
+
+_vlm_verdicts: deque[dict[str, object]] = deque(maxlen=30)
+
+
+def record_vlm_verdict(
+    *,
+    category: str,
+    confidence: float,
+    latency_ms: int,
+    frames_used: int,
+    parsed: bool,
+    raw: str | None = None,
+) -> None:
+    """Append one VLM verdict. `parsed=False` + `raw` = the model returned output
+    that failed JSON/schema validation (the neutral-fallback case); `raw` is the
+    truncated unparseable text so the cause is visible."""
+    with _lock:
+        _vlm_verdicts.append(
+            {
+                "ts": time.time(),
+                "category": category,
+                "confidence": round(float(confidence), 2),
+                "latency_ms": latency_ms,
+                "frames_used": frames_used,
+                "parsed": parsed,
+                "raw": (raw[:800] if raw else None),
+            }
+        )
+
+
+def get_vlm_verdicts() -> list[dict[str, object]]:
+    """Newest-last list of recent VLM verdicts for the diagnostics console."""
+    with _lock:
+        return list(_vlm_verdicts)
+
+
 def get_provider_health() -> ProviderHealth:
     with _lock:
         return _health
