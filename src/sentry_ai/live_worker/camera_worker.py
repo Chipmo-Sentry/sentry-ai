@@ -47,6 +47,115 @@ _STATS_LOG_SEC = 5.0
 _REID_MIN_BOX_FRAC = 0.08
 _REID_MIN_BOX_PX = 64.0
 
+# === Debug-snapshot overlay (segmentation mask + trail + wrist→item link) ===
+# COCO-17 keypoint indices (mirror behavior.py) used to draw the pose-polygon
+# body "mask" (option A: no extra seg model — approximate the silhouette from
+# the pose the worker already produces).
+_KP_NOSE = 0
+_KP_L_SHO, _KP_R_SHO = 5, 6
+_KP_L_WRI, _KP_R_WRI = 9, 10
+_KP_L_HIP, _KP_R_HIP = 11, 12
+# Limb chains drawn as thick rounded strokes; torso quad filled for body bulk.
+_LIMB_CHAINS: tuple[tuple[int, ...], ...] = (
+    (5, 7, 9),  # left shoulder → elbow → wrist
+    (6, 8, 10),  # right shoulder → elbow → wrist
+    (11, 13, 15),  # left hip → knee → ankle
+    (12, 14, 16),  # right hip → knee → ankle
+)
+# Order makes a non-self-intersecting quad: L-shoulder → R-shoulder → R-hip → L-hip.
+_TORSO_QUAD = (_KP_L_SHO, _KP_R_SHO, _KP_R_HIP, _KP_L_HIP)
+_MIN_KP_CONF_DRAW = 0.30  # joints below this confidence aren't drawn
+_TRAIL_MAXLEN = 32  # foot points kept per track for the trajectory trail
+_TRAIL_TTL_SEC = 3.0  # drop a track's trail this long after it vanishes
+_MASK_ALPHA = 0.40  # translucency of the pose-polygon body fill
+_ITEM_LINK_BGR = (0, 170, 255)  # amber wrist→item link (BGR)
+
+
+def _risk_bgr(color: str) -> tuple[int, int, int]:
+    """Risk band → BGR (cv2). Matches the existing box colours."""
+    if color == "red":
+        return (0, 0, 255)
+    if color == "yellow":
+        return (0, 230, 230)
+    return (0, 255, 0)
+
+
+def _kp_point(kp: NDArray[np.float32] | None, idx: int) -> tuple[int, int] | None:
+    """(x, y) pixel of keypoint `idx`, or None if unset / below draw-confidence."""
+    if kp is None or idx >= kp.shape[0]:
+        return None
+    row = kp[idx]
+    x, y = float(row[0]), float(row[1])
+    if not (x > 1.0 and y > 1.0):  # (0,0)-ish → keypoint not detected
+        return None
+    if kp.shape[1] >= 3 and float(row[2]) < _MIN_KP_CONF_DRAW:
+        return None
+    return int(x), int(y)
+
+
+def _draw_body_fill(
+    overlay: NDArray[np.uint8],
+    kp: NDArray[np.float32] | None,
+    bgr: tuple[int, int, int],
+    person_h: float,
+) -> bool:
+    """Approximate a body silhouette from pose keypoints (option A). Draws onto
+    `overlay` (later alpha-blended). Returns True if anything was drawn."""
+    if kp is None:
+        return False
+    th = max(4, int(person_h * 0.07))
+    drew = False
+    quad = [p for p in (_kp_point(kp, i) for i in _TORSO_QUAD) if p is not None]
+    if len(quad) >= 3:
+        cv2.fillPoly(overlay, [np.array(quad, dtype=np.int32)], bgr)
+        drew = True
+    for chain in _LIMB_CHAINS:
+        prev = None
+        for idx in chain:
+            cur = _kp_point(kp, idx)
+            if cur is not None:
+                cv2.circle(overlay, cur, max(3, th // 2), bgr, -1, cv2.LINE_AA)
+                if prev is not None:
+                    cv2.line(overlay, prev, cur, bgr, th, cv2.LINE_AA)
+                    drew = True
+            prev = cur
+    nose = _kp_point(kp, _KP_NOSE)
+    if nose is not None:
+        cv2.circle(overlay, nose, max(6, int(person_h * 0.06)), bgr, -1, cv2.LINE_AA)
+        drew = True
+    return drew
+
+
+def _draw_wrist_item_links(
+    img: NDArray[np.uint8],
+    kp: NDArray[np.float32] | None,
+    items: list[Item],
+    person_h: float,
+) -> None:
+    """Link a wrist to any nearby item box — visualises the 'holding' geometry."""
+    if kp is None or not items:
+        return
+    reach = person_h * 0.35
+    for widx in (_KP_L_WRI, _KP_R_WRI):
+        w = _kp_point(kp, widx)
+        if w is None:
+            continue
+        for it in items:
+            ix1, iy1, ix2, iy2 = it.box
+            nx = min(max(w[0], ix1), ix2)
+            ny = min(max(w[1], iy1), iy2)
+            if ((w[0] - nx) ** 2 + (w[1] - ny) ** 2) ** 0.5 <= reach:
+                cv2.rectangle(img, (int(ix1), int(iy1)), (int(ix2), int(iy2)), _ITEM_LINK_BGR, 2)
+                cv2.line(
+                    img,
+                    w,
+                    (int((ix1 + ix2) / 2), int((iy1 + iy2) / 2)),
+                    _ITEM_LINK_BGR,
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.circle(img, w, 4, _ITEM_LINK_BGR, -1, cv2.LINE_AA)
+
 
 def _reid_quality_ok(box: tuple[float, float, float, float], frame_h: int) -> bool:
     """True if this detection is large enough to produce a usable re-ID vector."""
@@ -146,6 +255,9 @@ class CameraWorker:
         self._snapshot_lock = threading.Lock()
         self._latest_snapshot_jpeg: bytes | None = None
         self._latest_snapshot_ts: float = 0.0
+        # Per-track foot-point history for the trajectory-trail overlay:
+        # tracker_id → (recent points, last-updated wall-clock). Pruned by TTL.
+        self._trail_hist: dict[int, tuple[deque[tuple[int, int]], float]] = {}
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -566,20 +678,51 @@ class CameraWorker:
         tracked: list[TrackedDetection],
         tracks_payload: list[TrackPayload],
     ) -> None:
-        """Draw bboxes onto a copy of the frame and JPEG-encode for the debug endpoint."""
+        """Annotate the frame for the debug endpoint: pose-polygon body mask,
+        trajectory trail, wrist→item link, and the risk/behavior box."""
         annotated = frame_bgr.copy()
+        items = self._cached_items
+        now = time.time()
+
+        # --- Update + prune per-track trajectory history (foot point) ---
+        for t in tracked:
+            foot = (int((t.box[0] + t.box[2]) / 2), int(t.box[3]))
+            hist_e = self._trail_hist.get(t.tracker_id)
+            dq = hist_e[0] if hist_e is not None else deque(maxlen=_TRAIL_MAXLEN)
+            dq.append(foot)
+            self._trail_hist[t.tracker_id] = (dq, now)
+        for tid in [k for k, (_, ts) in self._trail_hist.items() if now - ts > _TRAIL_TTL_SEC]:
+            del self._trail_hist[tid]
+
+        # --- Layer 1: translucent pose-polygon body "mask" (option A) ---
+        overlay = annotated.copy()
+        drew_mask = False
+        for t, p in zip(tracked, tracks_payload, strict=False):
+            person_h = max(1.0, t.box[3] - t.box[1])
+            if _draw_body_fill(overlay, t.keypoints, _risk_bgr(p.color), person_h):
+                drew_mask = True
+        if drew_mask:
+            cv2.addWeighted(overlay, _MASK_ALPHA, annotated, 1 - _MASK_ALPHA, 0, annotated)
+
+        # --- Layers 2-4: trail, wrist→item link, risk box + labels (opaque) ---
         # tracked and tracks_payload are aligned 1:1 by build order in _process_frame
         for t, p in zip(tracked, tracks_payload, strict=False):
             x1, y1, x2, y2 = (int(v) for v in t.box)
-            # Color in BGR (cv2) — green / yellow / red per risk band
-            if p.color == "red":
-                bgr = (0, 0, 255)
-            elif p.color == "yellow":
-                bgr = (0, 230, 230)
-            else:
-                bgr = (0, 255, 0)
+            bgr = _risk_bgr(p.color)
+            person_h = max(1.0, t.box[3] - t.box[1])
+
+            # Trajectory trail — foot path over recent frames.
+            hist = self._trail_hist.get(t.tracker_id)
+            if hist is not None and len(hist[0]) >= 2:
+                pts = np.array(hist[0], dtype=np.int32)
+                cv2.polylines(annotated, [pts], False, bgr, 2, cv2.LINE_AA)
+                cv2.circle(annotated, (int(pts[-1][0]), int(pts[-1][1])), 4, bgr, -1, cv2.LINE_AA)
+
+            # Wrist → item link (amber) when a wrist is near a detected item.
+            _draw_wrist_item_links(annotated, t.keypoints, items, person_h)
+
+            # Risk box + #id Risk% label (ADR-0024 absolute 0-100).
             cv2.rectangle(annotated, (x1, y1), (x2, y2), bgr, 3)
-            # Normalized 0-100 risk (ADR-0022)
             label = f"#{t.tracker_id}  Risk: {p.risk_pct:.0f}%"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), bgr, -1)
