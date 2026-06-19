@@ -8,9 +8,10 @@ def test_render_verify_v1_default_context() -> None:
     assert "browsing" in rendered
     assert "cart_pickup" in rendered
     assert "pocket_conceal" in rendered
+    assert "bag_conceal" in rendered
     assert "other" in rendered
     # Default store context substituted
-    assert "жирийн ритэйл" in rendered
+    assert "жирийн ритейл" in rendered
 
 
 def test_render_verify_v1_custom_store_context() -> None:
@@ -20,4 +21,4 @@ def test_render_verify_v1_custom_store_context() -> None:
     )
     assert "хүүхдийн дэлгүүр" in rendered
     # Default fallback should be absent when custom context provided
-    assert "жирийн ритэйл" not in rendered
+    assert "жирийн ритейл" not in rendered

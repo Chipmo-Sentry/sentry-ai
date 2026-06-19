@@ -33,7 +33,7 @@ async def test_vllm_parses_valid_response() -> None:
             return_value=_chat_response(
                 json.dumps(
                     {
-                        "category": "pocket_conceal",
+                        "actions": ["pocket_conceal"],
                         "confidence": 0.87,
                         "reasoning": "Хүн бараа авч халаас руу нуун, эргэж харсан.",
                     }
