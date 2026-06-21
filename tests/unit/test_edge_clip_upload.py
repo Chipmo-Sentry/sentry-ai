@@ -11,10 +11,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 
 from sentry_ai import rag
 from sentry_ai.api.v1 import verify as verify_mod
+from sentry_ai.auth import assert_service_token_configured
 from sentry_ai.schemas.vlm_output import Category, VLMOutput
 from sentry_ai.settings import get_settings
 
@@ -23,9 +24,18 @@ from sentry_ai.settings import get_settings
 def _clear_settings(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("CLIP_STORAGE_ROOT", raising=False)
     monkeypatch.delenv("AI_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("EDGE_CLIP_MAX_MB", raising=False)
+    monkeypatch.delenv("EDGE_VERIFY_MAX_QUEUE", raising=False)
+    monkeypatch.delenv("EDGE_VERIFY_MAX_CONCURRENCY", raising=False)
     get_settings.cache_clear()
+    # Reset the module-level GPU gate so each test gets a semaphore bound to its
+    # own event loop and a clean in-flight counter (ADR-0029 §12 / I5).
+    verify_mod._edge_gate = None
+    verify_mod._edge_inflight = 0
     yield
     get_settings.cache_clear()
+    verify_mod._edge_gate = None
+    verify_mod._edge_inflight = 0
 
 
 @pytest.fixture()
@@ -88,3 +98,60 @@ async def test_edge_clip_upload_without_rag_skips_retrieve(_patched) -> None:
     )
     assert calls["retrieve"] is None
     assert calls["store_context"] is None
+
+
+# --- S0 hardening (ADR-0029 §12) ---
+
+
+async def test_edge_clip_upload_rejects_oversize(_patched, monkeypatch) -> None:
+    """P3: bytes past edge_clip_max_mb are rejected (413), not buffered whole."""
+    monkeypatch.setenv("EDGE_CLIP_MAX_MB", "1")
+    get_settings.cache_clear()
+    oversize = b"\x00" * (1024 * 1024 + 1024)  # 1 MB + 1 KB
+    with pytest.raises(HTTPException) as ei:
+        await verify_mod.edge_clip_upload(
+            ollama=SimpleNamespace(client=None),
+            clip=_upload(oversize),
+            store_id=None,
+            provider=None,
+            rag_query=None,
+        )
+    assert ei.value.status_code == 413
+    assert verify_mod._edge_inflight == 0  # counter released on the error path
+
+
+async def test_edge_clip_upload_sheds_when_saturated(_patched, monkeypatch) -> None:
+    """I5: once running+waiting hits concurrency+max_queue, shed with 503."""
+    monkeypatch.setenv("EDGE_VERIFY_MAX_QUEUE", "0")
+    get_settings.cache_clear()
+    verify_mod._edge_inflight = 1  # == concurrency(1) + queue(0) → saturated
+    with pytest.raises(HTTPException) as ei:
+        await verify_mod.edge_clip_upload(
+            ollama=SimpleNamespace(client=None),
+            clip=_upload(),
+            store_id=None,
+            provider=None,
+            rag_query=None,
+        )
+    assert ei.value.status_code == 503
+
+
+def test_service_token_required_in_production() -> None:
+    """I6: a public verdict node must not start auth-open in staging/production."""
+    with pytest.raises(RuntimeError):
+        assert_service_token_configured(
+            SimpleNamespace(environment="production", ai_service_token=None)
+        )
+    with pytest.raises(RuntimeError):
+        assert_service_token_configured(SimpleNamespace(environment="staging", ai_service_token=""))
+    # dev stays open; production WITH a token is allowed.
+    assert (
+        assert_service_token_configured(SimpleNamespace(environment="dev", ai_service_token=None))
+        is None
+    )
+    assert (
+        assert_service_token_configured(
+            SimpleNamespace(environment="production", ai_service_token="tok")
+        )
+        is None
+    )

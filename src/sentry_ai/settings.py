@@ -168,6 +168,20 @@ class Settings(BaseSettings):
     # http(s):// and other SSRF/local-file vectors. rtsp(s) only by default.
     allowed_rtsp_schemes: str = "rtsp,rtsps"
 
+    # --- Edge clip-upload hardening (ADR-0029 §12, slice S0) ---
+    # Cap a single uploaded clip. Bytes are streamed to disk and the request is
+    # rejected (413) the moment it exceeds this, so a huge/hostile body can't
+    # buffer unbounded in RAM (the old code did one `await clip.read()`).
+    edge_clip_max_mb: int = 50
+    # GPU serialisation: how many edge-clip VLM verifies may run AT ONCE on this
+    # node. 1 = strictly serialise (safest for a single GPU — avoids VRAM OOM
+    # when several stores upload together). Extra requests wait on a semaphore.
+    edge_verify_max_concurrency: int = 1
+    # Backpressure: once this many uploads are already running+waiting
+    # (concurrency + this), shed further ones with 503 instead of growing an
+    # unbounded queue of pending verifies.
+    edge_verify_max_queue: int = 8
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 

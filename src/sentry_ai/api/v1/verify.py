@@ -1,5 +1,6 @@
 """POST /v1/verify — run Stage 2 inference on a clip."""
 
+import asyncio
 from pathlib import Path
 from typing import Annotated
 
@@ -18,6 +19,24 @@ from sentry_ai.schemas.verify import (
 from sentry_ai.settings import get_settings
 
 router = APIRouter(prefix="/v1", tags=["verify"], dependencies=[Depends(require_service_token)])
+
+# --- Edge clip-upload GPU gate (ADR-0029 §12 / I5) ---
+# A single GPU can't run N VLM verifies at once without risking VRAM OOM, so
+# edge-clip verifies are serialised through a semaphore (size = max_concurrency)
+# and the queue is bounded — once `_edge_inflight` (running + waiting) hits
+# concurrency + max_queue we shed with 503 instead of piling up. The semaphore
+# is created lazily so it binds to the running event loop.
+_edge_gate: asyncio.Semaphore | None = None
+_edge_inflight = 0
+
+
+def _get_edge_gate() -> asyncio.Semaphore:
+    global _edge_gate
+    if _edge_gate is None:
+        # Clamp to >=1: a 0 would make the gate un-acquirable → every verify hangs
+        # forever holding its temp file. Guards an operator misconfig footgun.
+        _edge_gate = asyncio.Semaphore(max(1, get_settings().edge_verify_max_concurrency))
+    return _edge_gate
 
 
 def _resolve_clip_path(raw: str) -> Path:
@@ -171,49 +190,78 @@ async def edge_clip_upload(
     different machines. We verify the bytes and return the same verdict shape;
     the backend owns tenancy + behaviour data and builds the alert.
     """
-    import asyncio
     import os
     import tempfile
 
     from sentry_ai import rag
 
-    provider_name = resolve_provider_name(provider)
-    try:
-        prov = get_provider(provider_name, ollama.client)
-    except KeyError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-
-    # Stream the upload to a temp file, confined under CLIP_STORAGE_ROOT when set
-    # (the same boundary /v1/verify enforces). Always cleaned up in `finally`.
-    root = get_settings().clip_storage_root
-    tmp_dir: str | None = None
-    if root:
-        await asyncio.to_thread(os.makedirs, root, exist_ok=True)
-        tmp_dir = root
-
-    data = await clip.read()
-    fd, tmp_name = tempfile.mkstemp(suffix=".mp4", dir=tmp_dir)
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-    try:
-        await asyncio.to_thread(tmp_path.write_bytes, data)
-
-        store_context = None
-        if rag_query:
-            store_context = await rag.retrieve_context(store_id, rag_query)
-
-        output, latency_ms, frames_used = await verify_clip(
-            clip_path=tmp_path, provider=prov, store_context=store_context
+    global _edge_inflight
+    settings = get_settings()
+    # Backpressure (I5): shed load BEFORE buffering when the node is saturated,
+    # so a flood of uploads can't pile up unbounded pending verifies.
+    if _edge_inflight >= settings.edge_verify_max_concurrency + settings.edge_verify_max_queue:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI node busy — retry shortly.",
         )
-        embedding = await rag.embed_text(output.reasoning)
-        return VerifyResponse(
-            category=output.category,
-            confidence=output.confidence,
-            reasoning=output.reasoning,
-            model_name=prov.name,
-            inference_latency_ms=latency_ms,
-            frames_used=frames_used,
-            embedding=embedding,
-        )
+    _edge_inflight += 1
+    try:
+        provider_name = resolve_provider_name(provider)
+        try:
+            prov = get_provider(provider_name, ollama.client)
+        except KeyError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+        # Stream the upload to a temp file, confined under CLIP_STORAGE_ROOT when
+        # set (the same boundary /v1/verify enforces). Reject (413, P3) the moment
+        # the byte count exceeds the cap so a huge body can't buffer in RAM (the
+        # old code did one `await clip.read()`). Always cleaned up in `finally`.
+        root = settings.clip_storage_root
+        tmp_dir: str | None = None
+        if root:
+            await asyncio.to_thread(os.makedirs, root, exist_ok=True)
+            tmp_dir = root
+
+        max_bytes = settings.edge_clip_max_mb * 1024 * 1024
+        fd, tmp_name = tempfile.mkstemp(suffix=".mp4", dir=tmp_dir)
+        tmp_path = Path(tmp_name)
+        try:
+            written = 0
+            too_large = False
+            with os.fdopen(fd, "wb") as fh:
+                while chunk := await clip.read(1 << 20):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        too_large = True
+                        break
+                    await asyncio.to_thread(fh.write, chunk)
+            if too_large:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"Клип хэт том байна (дээд хязгаар {settings.edge_clip_max_mb}MB).",
+                )
+
+            store_context = None
+            if rag_query:
+                store_context = await rag.retrieve_context(store_id, rag_query)
+
+            # GPU gate (I5): serialise the VLM verify so concurrent uploads don't
+            # co-run on one GPU and OOM. Other requests wait here (bounded above).
+            async with _get_edge_gate():
+                output, latency_ms, frames_used = await verify_clip(
+                    clip_path=tmp_path, provider=prov, store_context=store_context
+                )
+            embedding = await rag.embed_text(output.reasoning)
+            return VerifyResponse(
+                category=output.category,
+                confidence=output.confidence,
+                reasoning=output.reasoning,
+                model_name=prov.name,
+                inference_latency_ms=latency_ms,
+                frames_used=frames_used,
+                embedding=embedding,
+            )
+        finally:
+            await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
     finally:
-        await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
+        _edge_inflight -= 1
