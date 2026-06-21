@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from sentry_ai.auth import require_service_token
 from sentry_ai.dependencies import OllamaClientDep
@@ -154,3 +154,66 @@ async def cut_verify(
         file_size_bytes=cut.file_size_bytes,
         clip_b64=base64.b64encode(clip_bytes).decode("ascii"),
     )
+
+
+@router.post("/edge-clip-upload", response_model=VerifyResponse)
+async def edge_clip_upload(
+    ollama: Annotated["OllamaClientDep", Depends(OllamaClientDep)],
+    clip: Annotated[UploadFile, File()],
+    store_id: Annotated[str | None, Form()] = None,
+    provider: Annotated[str | None, Form()] = None,
+    rag_query: Annotated[str | None, Form()] = None,
+) -> VerifyResponse:
+    """Edge Stage-1 path (ADR-0029): the store agent (sentry-agent-pc) ran
+    YOLO + behaviour LOCALLY and uploads only the suspicious clip BYTES. The
+    Railway backend forwards them here as multipart — `/v1/verify`'s clip_path
+    is read on THIS host, so it can't work when the backend and the GPU node are
+    different machines. We verify the bytes and return the same verdict shape;
+    the backend owns tenancy + behaviour data and builds the alert.
+    """
+    import asyncio
+    import os
+    import tempfile
+
+    from sentry_ai import rag
+
+    provider_name = resolve_provider_name(provider)
+    try:
+        prov = get_provider(provider_name, ollama.client)
+    except KeyError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    # Stream the upload to a temp file, confined under CLIP_STORAGE_ROOT when set
+    # (the same boundary /v1/verify enforces). Always cleaned up in `finally`.
+    root = get_settings().clip_storage_root
+    tmp_dir: str | None = None
+    if root:
+        await asyncio.to_thread(os.makedirs, root, exist_ok=True)
+        tmp_dir = root
+
+    data = await clip.read()
+    fd, tmp_name = tempfile.mkstemp(suffix=".mp4", dir=tmp_dir)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        await asyncio.to_thread(tmp_path.write_bytes, data)
+
+        store_context = None
+        if rag_query:
+            store_context = await rag.retrieve_context(store_id, rag_query)
+
+        output, latency_ms, frames_used = await verify_clip(
+            clip_path=tmp_path, provider=prov, store_context=store_context
+        )
+        embedding = await rag.embed_text(output.reasoning)
+        return VerifyResponse(
+            category=output.category,
+            confidence=output.confidence,
+            reasoning=output.reasoning,
+            model_name=prov.name,
+            inference_latency_ms=latency_ms,
+            frames_used=frames_used,
+            embedding=embedding,
+        )
+    finally:
+        await asyncio.to_thread(tmp_path.unlink, missing_ok=True)
