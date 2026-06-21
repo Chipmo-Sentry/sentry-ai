@@ -47,6 +47,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         default_provider=settings.default_provider,
     )
 
+    # I6 (ADR-0029 §12): a public verdict node must not run auth-open. Raises in
+    # staging/production when AI_SERVICE_TOKEN is unset — fail before serving.
+    from sentry_ai.auth import assert_service_token_configured
+
+    assert_service_token_configured(settings)
+
     # M1-LIVE L2: auto-start live workers from settings.
     # Red-line #2 / ADR-0007: RTSP ingest must NEVER run on Railway — refuse to
     # auto-start workers there even if LIVE_AUTO_START is set by mistake.
