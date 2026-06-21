@@ -33,7 +33,9 @@ _edge_inflight = 0
 def _get_edge_gate() -> asyncio.Semaphore:
     global _edge_gate
     if _edge_gate is None:
-        _edge_gate = asyncio.Semaphore(get_settings().edge_verify_max_concurrency)
+        # Clamp to >=1: a 0 would make the gate un-acquirable → every verify hangs
+        # forever holding its temp file. Guards an operator misconfig footgun.
+        _edge_gate = asyncio.Semaphore(max(1, get_settings().edge_verify_max_concurrency))
     return _edge_gate
 
 

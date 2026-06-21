@@ -26,6 +26,7 @@ def _clear_settings(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("AI_SERVICE_TOKEN", raising=False)
     monkeypatch.delenv("EDGE_CLIP_MAX_MB", raising=False)
     monkeypatch.delenv("EDGE_VERIFY_MAX_QUEUE", raising=False)
+    monkeypatch.delenv("EDGE_VERIFY_MAX_CONCURRENCY", raising=False)
     get_settings.cache_clear()
     # Reset the module-level GPU gate so each test gets a semaphore bound to its
     # own event loop and a clean in-flight counter (ADR-0029 §12 / I5).
