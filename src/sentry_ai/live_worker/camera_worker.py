@@ -25,6 +25,7 @@ from sentry_ai.live_worker.schemas import FrameMetadata, TrackPayload
 from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
 from sentry_ai.live_worker.yolo_det import Item, YoloItemRunner
 from sentry_ai.live_worker.yolo_runner import YoloPoseRunner
+from sentry_ai.live_worker.zones import compile_zones, zones_at
 from sentry_ai.logging_setup import get_logger
 from sentry_ai.runtime_config import get_detection
 from sentry_ai.settings import get_settings
@@ -175,9 +176,15 @@ class CameraWorker:
         registry: StorePersonRegistry | None = None,
         embedder: Embedder | None = None,
         alert_threshold_pct: float | None = None,
+        zones: list[dict[str, object]] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
+        # docs/29 P1c — per-camera detection zones. `zones` keeps the raw list for
+        # the manager's restart-on-change check; `_compiled_zones` is the
+        # {type: [polygon]} form the per-frame point-in-zone test uses.
+        self.zones = zones or None
+        self._compiled_zones = compile_zones(zones)
         # Constructor frame_skip is the FALLBACK; the live value comes from the
         # central per-node config (runtime_config) and is read fresh each frame so
         # an operator edit in superadmin takes effect without restarting the worker.
@@ -523,11 +530,19 @@ class CameraWorker:
         best_scan: tuple[float, int, ScoreResult] | None = None
         for t in tracked:
             person_h = max(1.0, t.box[3] - t.box[1])
+            # docs/29 P1c — which zone type(s) the person's FOOT point is inside.
+            # Normalize against THIS frame's w,h (risk #3: real frame, not nominal
+            # res). Skip the test entirely when the camera has no zones.
+            in_zones: set[str] | None = None
+            if self._compiled_zones:
+                foot_x = (t.box[0] + t.box[2]) / 2.0
+                in_zones = zones_at(foot_x / max(1, w), t.box[3] / max(1, h), self._compiled_zones)
             result = self._scorer.score(
                 t.tracker_id,
                 t.keypoints,
                 person_h,
                 items=self._cached_items,
+                in_zones=in_zones,
             )
             risk_pct = result.risk_pct  # absolute 0-100 (ADR-0024)
 

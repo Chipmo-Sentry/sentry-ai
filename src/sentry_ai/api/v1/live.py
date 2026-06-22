@@ -41,11 +41,14 @@ def start(req: LiveStartRequest) -> dict[str, str]:
             detail="Live RTSP workers must not run on Railway — deploy sentry-ai on the GPU/VPS host",
         )
     _validate_rtsp_url(req.rtsp_url)
+    # Flatten zones to plain dicts so the worker/scorer stay pydantic-free.
+    zones = [z.model_dump() for z in req.zones] if req.zones else None
     get_manager().start_camera(
         req.camera_id,
         req.rtsp_url,
         store_id=req.store_id,
         alert_threshold_pct=req.risk_threshold,
+        zones=zones,
     )
     return {"camera_id": req.camera_id, "status": "starting"}
 

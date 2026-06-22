@@ -69,6 +69,18 @@ class FrameMetadata(BaseModel):
 # === Control API schemas ===
 
 
+class Zone(BaseModel):
+    """A per-camera detection polygon in normalized 0-1 image space (docs/29).
+
+    Lenient: the backend already validates on write, so the node accepts what it's
+    given (extra fields ignored) and the worker's compile step drops anything
+    malformed rather than rejecting the whole start request."""
+
+    type: str
+    points: list[tuple[float, float]] = Field(default_factory=list)
+    id: str | None = None
+
+
 class LiveStartRequest(BaseModel):
     camera_id: str = Field(min_length=1, max_length=64)
     rtsp_url: str = Field(min_length=1, description="Source URL — usually MediaMTX")
@@ -81,6 +93,9 @@ class LiveStartRequest(BaseModel):
         le=100.0,
         description="Per-camera breach threshold (0-100). None → node-global default.",
     )
+    # docs/29 P1c — per-camera detection zones; drive the zone-aware criteria
+    # (exit_after_concealment / repeated_shelf_visit). None/empty → no zone scoring.
+    zones: list[Zone] | None = Field(default=None)
 
 
 class LiveWorkerStatus(BaseModel):
