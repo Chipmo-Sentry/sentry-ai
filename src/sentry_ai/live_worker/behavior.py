@@ -309,10 +309,13 @@ class TrackState:
     loiter_since: float | None = None
     loiter_scored: bool = False
     # docs/29 P1c zone tracking: whether currently inside a shelf zone (for
-    # entry-transition counting) + the count of distinct shelf entries. Both reset
-    # on the IDLE episode reset, same as the other per-episode ledgers.
+    # entry-transition counting), the count of distinct shelf entries, and a
+    # one-shot flag so repeated_shelf_visit banks at most once per track. All
+    # THREE are track-lifetime (NOT cleared by the IDLE episode reset; only by
+    # stale cleanup) — see the NB in _advance_state.
     in_shelf: bool = False
     shelf_visits: int = 0
+    shelf_visit_scored: bool = False
     # Episode tracking: when the first criterion of this episode fired, and the
     # accumulated score contribution per criterion key (insertion order =
     # first-fired order). Both reset on the IDLE reset in _advance_state.
@@ -785,23 +788,27 @@ class BehaviorScorer:
                     state.concealment_frames = 0
 
         # 11. Repeated shelf visit (docs/29 P1c) — count distinct ENTRIES into a
-        # shelf zone (a not-inside → inside transition); bank once when the count
-        # reaches the threshold. A camera with no shelf zone never sets in_zones,
-        # so this is a no-op there.
+        # shelf zone (a not-inside → inside transition); bank ONCE per track when
+        # the count reaches the threshold. The bank lives INSIDE the entry
+        # transition and is deduped by the track-lifetime `shelf_visit_scored`
+        # flag (NOT the per-episode ledger): both shelf_visits and the flag survive
+        # the IDLE reset, so the criterion can't re-bank every idle frame after a
+        # reset (which would pump a benign repeat-browser's score up to the alert
+        # band). A camera with no shelf zone never sets in_zones → no-op.
         now_in_shelf = "shelf" in in_zones
         if now_in_shelf and not state.in_shelf:
             state.shelf_visits += 1
-        state.in_shelf = now_in_shelf
-        visits_threshold = max(2, int(self._dp("repeated_shelf_visit", "visits_threshold", 3.0)))
-        if (
-            state.shelf_visits >= visits_threshold
-            and "repeated_shelf_visit" not in state.episode_behaviors
-        ):
-            _add(
-                "repeated_shelf_visit",
-                self.weights.get("repeated_shelf_visit", 0.0),
-                "Тавиур давтан зочлох",
+            visits_threshold = max(
+                2, int(self._dp("repeated_shelf_visit", "visits_threshold", 3.0))
             )
+            if state.shelf_visits >= visits_threshold and not state.shelf_visit_scored:
+                _add(
+                    "repeated_shelf_visit",
+                    self.weights.get("repeated_shelf_visit", 0.0),
+                    "Тавиур давтан зочлох",
+                )
+                state.shelf_visit_scored = True
+        state.in_shelf = now_in_shelf
 
         # 12. Exit after concealment (docs/29 P1c) — a person who has already
         # banked a concealment criterion this episode and now stands in an EXIT
@@ -925,10 +932,12 @@ class BehaviorScorer:
             state.episode_behaviors.clear()
             state.episode_behavior_ts.clear()
             state.episode_events.clear()
-            # NB: shelf_visits / in_shelf are NOT reset here — a person who keeps
-            # returning to the same shelf does so ACROSS calm periods, so the count
-            # must persist for the track's life (cleared only by stale cleanup when
-            # the track is dropped). The episode reset would otherwise zero it on
-            # every leave-the-shelf frame and the criterion could never accumulate.
+            # NB: shelf_visits / in_shelf / shelf_visit_scored are NOT reset here —
+            # a person who keeps returning to the same shelf does so ACROSS calm
+            # periods, so the count must persist for the track's life (cleared only
+            # by stale cleanup when the track is dropped). The episode reset would
+            # otherwise zero the count on every leave-the-shelf frame (so it could
+            # never accumulate), and re-arm the once-per-track bank (re-banking +3
+            # every idle frame → a benign repeat-browser pumped into the alert band).
 
         state.state = target

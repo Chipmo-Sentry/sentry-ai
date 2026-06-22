@@ -34,17 +34,27 @@ def compile_zones(zones: list[dict[str, object]] | None) -> CompiledZones:
         pts_raw = z.get("points")
         if not isinstance(pts_raw, list) or len(pts_raw) < 3:
             continue
+        # Reject the WHOLE polygon if ANY vertex is malformed or out of [0,1] —
+        # dropping just the bad vertex would silently RESHAPE the operator's zone
+        # into a different region (a phantom exit/shelf zone causing false alerts).
+        # A wrong zone is worse than a missing one; the backend validates on write,
+        # so an out-of-range vertex only reaches here via a garbled payload.
         poly: list[tuple[float, float]] = []
+        valid = True
         for p in pts_raw:
             if not isinstance(p, (list, tuple)) or len(p) < 2:
-                continue
+                valid = False
+                break
             try:
                 x, y = float(p[0]), float(p[1])
             except (TypeError, ValueError):
-                continue
-            if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0:
-                poly.append((x, y))
-        if len(poly) >= 3:
+                valid = False
+                break
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                valid = False
+                break
+            poly.append((x, y))
+        if valid and len(poly) >= 3:
             out.setdefault(str(ztype), []).append(poly)
     return out
 

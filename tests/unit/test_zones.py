@@ -32,6 +32,15 @@ def test_compile_none_is_empty() -> None:
     assert compile_zones(None) == {}
 
 
+def test_compile_rejects_polygon_with_out_of_range_vertex() -> None:
+    """Regression (review): a 4+-vertex zone with ONE out-of-range bulge vertex
+    must be dropped ENTIRELY, not silently reshaped into the rectangle of its
+    in-range vertices (which would be a phantom zone the operator never drew)."""
+    c = compile_zones([{"type": "shelf", "points": [[0, 0], [1, 0], [1.2, 0.5], [1, 1], [0, 1]]}])
+    assert c == {}
+    assert zones_at(0.95, 0.5, c) == set()
+
+
 def test_point_in_poly_basic_square() -> None:
     sq = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
     assert point_in_poly(0.5, 0.5, sq) is True

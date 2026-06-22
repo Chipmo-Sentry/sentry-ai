@@ -114,6 +114,41 @@ def test_staying_in_shelf_is_one_visit() -> None:
     assert "repeated_shelf_visit" not in r.behaviors
 
 
+def test_repeated_shelf_visit_banks_once_then_decays() -> None:
+    """Regression (review HIGH): after firing, idle frames far from any shelf must
+    let the score DECAY — the old per-episode guard re-banked +3 every frame after
+    the IDLE reset, pumping a benign repeat-browser into the alert band."""
+    scorer = BehaviorScorer(clock=FakeClock())
+    _enter(scorer)
+    _leave(scorer)
+    _enter(scorer)
+    _leave(scorer)
+    r = _enter(scorer)  # 3rd entry → fires once
+    peak = r.risk_pct
+    assert "repeated_shelf_visit" in r.behaviors
+    last = r
+    for _ in range(60):  # standing nowhere near a shelf
+        last = scorer.score(1, _neutral(), PERSON_H, in_zones=set())
+    assert last.risk_pct < peak  # decayed, NOT pumped up
+    assert last.risk_pct <= 10.0  # back to LOW, not pinned yellow
+
+
+def test_repeated_shelf_visit_not_rebanked_on_later_entries() -> None:
+    """Once scored it never re-banks, even on further shelf re-entries (once/track)."""
+    scorer = BehaviorScorer(clock=FakeClock())
+    _enter(scorer)
+    _leave(scorer)
+    _enter(scorer)
+    _leave(scorer)
+    _enter(scorer)  # fires
+    for _ in range(60):  # let the episode reset
+        scorer.score(1, _neutral(), PERSON_H, in_zones=set())
+    _leave(scorer)
+    r = _enter(scorer)  # a 4th distinct entry
+    fresh = [e for e in r.behavior_events if e["key"] == "repeated_shelf_visit"]
+    assert not fresh  # not re-banked
+
+
 def test_no_zones_means_no_zone_criteria() -> None:
     scorer = BehaviorScorer(clock=FakeClock())
     _conceal(scorer)
