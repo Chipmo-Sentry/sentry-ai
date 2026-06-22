@@ -246,3 +246,27 @@ def test_track_payload_episode_fields_default_empty() -> None:
     assert dumped["behavior_offsets"] == {}
     assert dumped["reasons"] == []
     assert dumped["episode_started_ms"] is None
+
+
+# === per-fire breakdown (behavior_events) ===
+
+
+def test_behavior_events_record_each_banking() -> None:
+    """Each smoothed fire of a criterion appends its own {key, offset_sec, score}
+    event — so the alert breakdown can show every +score increment as a row,
+    not just a per-criterion total."""
+    scorer = _scorer()
+    _fire_looking(scorer)
+    _fire_looking(scorer)
+    r = _fire_looking(scorer)
+
+    looking = [e for e in r.behavior_events if e["key"] == "looking_around"]
+    # One event per fire (≥3), each with the full shape.
+    assert len(looking) >= 3
+    for e in r.behavior_events:
+        assert set(e) == {"key", "offset_sec", "score"}
+        assert e["score"] > 0
+
+    # Sum of the per-fire increments equals the accumulated ledger total.
+    total = sum(float(e["score"]) for e in looking)
+    assert abs(total - r.behavior_scores["looking_around"]) < 0.5
