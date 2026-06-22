@@ -19,9 +19,11 @@ Supersedes the v1 6-dimension single-frame scorer. Key changes (ADR-0024):
   * **New detectors:** bag_interaction (wrist inside a bag bbox while holding)
     and pocket_interaction (wrist at a hip while holding).
 
-Detectors live HERE; the backend `behaviors` catalog may also list criteria that
-have no detector yet (repeated_shelf_visit, group_distraction, exit_after_
-concealment, rfid_mismatch) — those are inert (score 0) until a detector ships.
+Detectors live HERE. docs/29 P1c added the zone-aware detectors
+repeated_shelf_visit + exit_after_concealment (live when the camera has zones).
+The backend `behaviors` catalog still lists the multi-person criteria
+(group_distraction, coordinated_activity) that have no detector yet — those are
+inert (score 0) until a detector ships.
 
 Per-track state decays: 0.98 when idle, 0.999 when "holding".
 """
