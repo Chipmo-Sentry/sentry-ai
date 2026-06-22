@@ -643,7 +643,9 @@ class CameraWorker:
         self._submit_breach(tracker_id, peak, result)
 
     def _submit_breach(self, tracker_id: int, peak_risk_pct: float, result: ScoreResult) -> None:
-        detail = [
+        # Per-FIRE breakdown (each +score increment is its own row). Fall back to
+        # the per-criterion summary for safety / older episodes.
+        detail = result.behavior_events or [
             {
                 "key": k,
                 "offset_sec": round(float(result.behavior_offsets.get(k, 0.0)), 1),

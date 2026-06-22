@@ -36,7 +36,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -268,6 +268,10 @@ class ScoreResult:
     behavior_scores: dict[str, float] = field(default_factory=dict)
     # Per-criterion seconds-from-episode-start (first firing), for the timeline.
     behavior_offsets: dict[str, float] = field(default_factory=dict)
+    # Per-FIRE timeline: one entry per banking event ({key, offset_sec, score}),
+    # chronological — drives the itemized alert breakdown (each +score increment
+    # is its own row). Empty for manual uploads / older nodes.
+    behavior_events: list[dict[str, Any]] = field(default_factory=list)
     episode_started_at: float | None = None
 
 
@@ -307,6 +311,9 @@ class TrackState:
     # First-fired wall-clock ts per criterion key this episode → drives the
     # per-criterion "X seconds in" offset on the alert timeline. Same reset.
     episode_behavior_ts: dict[str, float] = field(default_factory=dict)
+    # Every banking event this episode: (key, wall-clock ts, banked amount), in
+    # chronological order → the per-FIRE itemized breakdown. Same reset.
+    episode_events: list[tuple[str, float, float]] = field(default_factory=list)
 
 
 class BehaviorScorer:
@@ -477,6 +484,19 @@ class BehaviorScorer:
                 if ep_start is not None
                 else {}
             )
+            # Per-FIRE breakdown: one {key, offset_sec, score} per banking event.
+            events: list[dict[str, Any]] = (
+                [
+                    {
+                        "key": k,
+                        "offset_sec": round(max(0.0, ts - ep_start), 1),
+                        "score": round(amount, 1),
+                    }
+                    for k, ts, amount in state.episode_events
+                ]
+                if ep_start is not None
+                else []
+            )
 
             return ScoreResult(
                 raw_score=state.score,
@@ -490,6 +510,7 @@ class BehaviorScorer:
                 behaviors=list(state.episode_behaviors.keys()),
                 behavior_scores=dict(state.episode_behaviors),
                 behavior_offsets=offsets,
+                behavior_events=events,
                 episode_started_at=state.episode_started_at,
             )
 
@@ -566,6 +587,7 @@ class BehaviorScorer:
             delta += amount
             state.episode_behaviors[key] = state.episode_behaviors.get(key, 0.0) + amount
             state.episode_behavior_ts.setdefault(key, now)  # first firing wins
+            state.episode_events.append((key, now, amount))  # per-fire breakdown
             reasons.append(reason)
             fired.add(key)
 
@@ -794,6 +816,7 @@ class BehaviorScorer:
                     state.episode_behaviors.get(rule.key, 0.0) + bonus_val
                 )
                 state.episode_behavior_ts.setdefault(rule.key, now)
+                state.episode_events.append((rule.key, now, bonus_val))
                 if rule.critical:
                     critical = True
         return bonus, awarded, critical
@@ -847,5 +870,6 @@ class BehaviorScorer:
             state.episode_started_at = None
             state.episode_behaviors.clear()
             state.episode_behavior_ts.clear()
+            state.episode_events.clear()
 
         state.state = target
