@@ -214,6 +214,29 @@ def test_pocket_interaction_when_holding() -> None:
     assert "Халаас руу" in r.reasons
 
 
+def test_pocket_interaction_fires_without_holding_by_default() -> None:
+    """The fix: pocketing a NON-COCO retail item leaves `holding` False (no COCO
+    pickup), yet hand-to-pocket is itself the concealment signal — so it must
+    fire on geometry alone (require_holding defaults to 0)."""
+    scorer = BehaviorScorer()
+    k = _neutral()
+    k[L_WRIST] = (92, 300, 1.0)  # on the left hip, NO prior pickup
+    r = scorer.score(1, k, PERSON_H, items=[])
+    assert "Халаас руу" in r.reasons
+    assert scorer._states[1].holding is False  # fired with no COCO item pickup
+
+
+def test_require_holding_param_restores_strict_pocket_gate() -> None:
+    """Operators can set the per-detector `require_holding` param to 1 to demand a
+    prior pickup again (the pre-fix strict behaviour)."""
+    scorer = BehaviorScorer()
+    scorer.update_params(detector={"pocket_interaction": {"require_holding": 1}})
+    k = _neutral()
+    k[L_WRIST] = (92, 300, 1.0)  # on the hip, but no pickup → strict gate blocks it
+    r = scorer.score(1, k, PERSON_H, items=[])
+    assert "Халаас руу" not in r.reasons
+
+
 # === hold-latch release (T06/H1) ===
 
 
