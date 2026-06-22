@@ -25,11 +25,13 @@ AI_DIMENSION_KEYS: list[str] = [
     "bag_interaction",
     "body_block",
     "crouch",
+    "exit_after_concealment",
     "item_pickup",
     "loitering",
     "looking_around",
     "pocket_interaction",
     "rapid_movement",
+    "repeated_shelf_visit",
     "wrist_to_torso",
 ]
 

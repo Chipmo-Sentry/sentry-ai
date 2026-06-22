@@ -68,6 +68,9 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "wrist_to_torso": 12.0,
     "bag_interaction": 15.0,
     "pocket_interaction": 12.0,
+    # docs/29 P1c — zone-aware (need per-camera polygons; no-op without zones).
+    "repeated_shelf_visit": 3.0,  # LEVEL 1 — revisits the same shelf zone N times
+    "exit_after_concealment": 50.0,  # LEVEL 4 — concealed, then enters an exit zone
 }
 
 SCORE_DECAY_IDLE = 0.98
@@ -140,6 +143,8 @@ DEFAULT_DETECTOR_PARAMS: dict[str, dict[str, float]] = {
     "pocket_interaction": {"radius_frac": 0.12},
     "rapid_movement": {"frac": 0.08},
     "loitering": {"seconds": LOITER_SECONDS},
+    # docs/29 P1c — distinct shelf-zone entries before the criterion banks.
+    "repeated_shelf_visit": {"visits_threshold": 3.0},
 }
 
 RiskColor = Literal["green", "yellow", "red"]
@@ -303,6 +308,11 @@ class TrackState:
     loiter_anchor: tuple[float, float] | None = None
     loiter_since: float | None = None
     loiter_scored: bool = False
+    # docs/29 P1c zone tracking: whether currently inside a shelf zone (for
+    # entry-transition counting) + the count of distinct shelf entries. Both reset
+    # on the IDLE episode reset, same as the other per-episode ledgers.
+    in_shelf: bool = False
+    shelf_visits: int = 0
     # Episode tracking: when the first criterion of this episode fired, and the
     # accumulated score contribution per criterion key (insertion order =
     # first-fired order). Both reset on the IDLE reset in _advance_state.
@@ -425,11 +435,14 @@ class BehaviorScorer:
         keypoints: NDArray[np.float32] | None,
         person_h: float,
         items: list[Item] | None = None,
+        in_zones: set[str] | None = None,
     ) -> ScoreResult:
         """Compute and update score + state for one tracked person. Thread-safe.
 
         `keypoints` may be (17,2) [x,y] or (17,3) [x,y,conf] — confidence is used
         to gate joints when present. `items` is the nearby COCO item detections.
+        `in_zones` (docs/29 P1c) is the set of zone types the person's foot point
+        is currently inside (e.g. {"exit"}); drives the zone-aware criteria.
         """
         with self._lock:
             state = self._states.get(tracker_id)
@@ -448,7 +461,9 @@ class BehaviorScorer:
             reasons: list[str] = []
             fired: set[str] = set()
             if keypoints is not None and len(keypoints) >= 17 and person_h > 0:
-                delta, reasons, fired = self._analyze(state, keypoints, person_h, items or [], now)
+                delta, reasons, fired = self._analyze(
+                    state, keypoints, person_h, items or [], now, in_zones or set()
+                )
             state.score += delta
 
             # First fired criterion since the last reset opens a new episode.
@@ -544,6 +559,7 @@ class BehaviorScorer:
         person_h: float,
         items: list[Item],
         now: float,
+        in_zones: set[str],
     ) -> tuple[float, list[str], set[str]]:
         l_eye = kps[KP_L_EYE]
         r_eye = kps[KP_R_EYE]
@@ -768,6 +784,40 @@ class BehaviorScorer:
                     state.no_hold_frames = 0
                     state.concealment_frames = 0
 
+        # 11. Repeated shelf visit (docs/29 P1c) — count distinct ENTRIES into a
+        # shelf zone (a not-inside → inside transition); bank once when the count
+        # reaches the threshold. A camera with no shelf zone never sets in_zones,
+        # so this is a no-op there.
+        now_in_shelf = "shelf" in in_zones
+        if now_in_shelf and not state.in_shelf:
+            state.shelf_visits += 1
+        state.in_shelf = now_in_shelf
+        visits_threshold = max(2, int(self._dp("repeated_shelf_visit", "visits_threshold", 3.0)))
+        if (
+            state.shelf_visits >= visits_threshold
+            and "repeated_shelf_visit" not in state.episode_behaviors
+        ):
+            _add(
+                "repeated_shelf_visit",
+                self.weights.get("repeated_shelf_visit", 0.0),
+                "Тавиур давтан зочлох",
+            )
+
+        # 12. Exit after concealment (docs/29 P1c) — a person who has already
+        # banked a concealment criterion this episode and now stands in an EXIT
+        # zone is the highest-confidence theft signal. Bank once (→ ALERT via
+        # _advance_state). Needs the camera to have an exit zone drawn.
+        if (
+            "exit" in in_zones
+            and any(k in state.episode_behaviors for k in _CONCEALMENT_KEYS)
+            and "exit_after_concealment" not in state.episode_behaviors
+        ):
+            _add(
+                "exit_after_concealment",
+                self.weights.get("exit_after_concealment", 0.0),
+                "Нуусны дараа гарц руу",
+            )
+
         return delta, reasons, fired
 
     @staticmethod
@@ -851,6 +901,10 @@ class BehaviorScorer:
             target = max(target, BehaviorState.PRODUCT_INTERACTION)
         if fired & _CONCEALMENT_KEYS or state.concealment_frames > 0:
             target = max(target, BehaviorState.CONCEALMENT)
+        # docs/29 P1c: concealed-then-heading-for-the-exit is a critical event —
+        # jump straight to ALERT (the EXIT_ATTEMPT state realized at last).
+        if "exit_after_concealment" in fired:
+            target = BehaviorState.ALERT
         # Sequence priority + CRITICAL band → ALERT, overriding individual score.
         if seq_critical or pct > self.high_max:
             target = BehaviorState.ALERT
@@ -871,5 +925,10 @@ class BehaviorScorer:
             state.episode_behaviors.clear()
             state.episode_behavior_ts.clear()
             state.episode_events.clear()
+            # NB: shelf_visits / in_shelf are NOT reset here — a person who keeps
+            # returning to the same shelf does so ACROSS calm periods, so the count
+            # must persist for the track's life (cleared only by stale cleanup when
+            # the track is dropped). The episode reset would otherwise zero it on
+            # every leave-the-shelf frame and the criterion could never accumulate.
 
         state.state = target

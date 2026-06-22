@@ -41,6 +41,7 @@ class LiveWorkerManager:
         frame_skip: int = 3,
         store_id: str | None = None,
         alert_threshold_pct: float | None = None,
+        zones: list[dict[str, object]] | None = None,
     ) -> None:
         with self._lock:
             if not self._emitter_started:
@@ -50,11 +51,13 @@ class LiveWorkerManager:
 
             existing = self._workers.get(camera_id)
             if existing is not None and existing.running:
-                # Restart on a changed source OR a changed breach threshold so a
-                # web-UI threshold edit takes effect (the worker reads it at start).
+                # Restart on a changed source, breach threshold, OR zones so a
+                # web-UI edit takes effect (the worker reads all three at start;
+                # docs/29 P1c — a zone edit must restart to re-arm the engine).
                 if (
                     existing.rtsp_url == rtsp_url
                     and existing.alert_threshold_pct == alert_threshold_pct
+                    and existing.zones == (zones or None)
                 ):
                     log.info("manager.already_running", camera_id=camera_id)
                     return
@@ -70,6 +73,7 @@ class LiveWorkerManager:
                 registry=registry,
                 embedder=self._embedder if registry is not None else None,
                 alert_threshold_pct=alert_threshold_pct,
+                zones=zones,
             )
             worker.start()
             self._workers[camera_id] = worker
