@@ -663,16 +663,27 @@ class BehaviorScorer:
             else:
                 state.concealment_frames = max(0, state.concealment_frames - 1)
 
-        # 6. Bag interaction — wrist inside a bag bbox while holding merchandise.
-        if state.holding and items:
+        # 6. Bag interaction — wrist inside a bag bbox. Fires on geometry ALONE by
+        # default: most retail merchandise is NOT a COCO class, so gating on
+        # `holding` (set only when a wrist enters a COCO item bbox) silently
+        # disabled bag-concealment for real store items — the #1 "it never detects
+        # me hiding something" cause. The bag itself IS a COCO class (handbag/
+        # backpack), and the VLM verifies the clip, so a stray reach-into-bag is
+        # filtered downstream. Set the per-detector `require_holding` param to 1 to
+        # restore the strict "must have picked up a COCO item first" gate.
+        if items and (state.holding or self._dp("bag_interaction", "require_holding", 0.0) < 0.5):
             bags = [it for it in items if it.label in ("handbag", "backpack", "suitcase")]
             if bags and self._wrist_in_any(l_wrist, r_wrist, [b.box for b in bags]):
                 _add("bag_interaction", self.weights.get("bag_interaction", 0.0), "Гар уут руу")
 
-        # 7. Pocket interaction — wrist near a hip while holding. Real hip
-        # keypoints win; when they're off-frame (upper-body cameras) fall back to
+        # 7. Pocket interaction — wrist near a hip. Like bag (above), fires on
+        # geometry alone by default (require_holding=0) so it catches pocketing a
+        # non-COCO retail item; set `require_holding`=1 to gate on a prior pickup.
+        # Real hip keypoints win; when off-frame (upper-body cameras) fall back to
         # an estimated hip point below each shoulder at the waist line (hip_cy).
-        if state.holding and hip_cy is not None:
+        if hip_cy is not None and (
+            state.holding or self._dp("pocket_interaction", "require_holding", 0.0) < 0.5
+        ):
             radius = person_h * self._dp("pocket_interaction", "radius_frac", 0.12)
             hip_points: list[tuple[float, float]] = []
             if _kp_valid(l_hip):
