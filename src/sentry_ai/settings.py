@@ -61,8 +61,15 @@ class Settings(BaseSettings):
     # processor upscales to its min_pixels floor, so SHRINKING the JPEG no longer
     # cuts tokens: frame_max_dim is bottomed out at 320. The only ways left to cut
     # vision tokens are a server that exposes min/max_pixels (vLLM) or a lighter
-    # VLM. Keep 1×320 here; the remaining win is on the text side (prompt + output).
-    frames_per_clip: int = 1
+    # VLM. Keep 320 here; the remaining token win is on the text side (prompt + output).
+    #
+    # frames_per_clip: shoplifting is TEMPORAL (approach → select → conceal → leave) —
+    # a single still rarely shows the act, so we send the VLM several evenly-spaced
+    # keyframes. This dataclass value is just the FRESH-INSTALL fallback (3, ~25/50/
+    # 75% of the clip); a real GPU node sets more via env (.env.example ships
+    # FRAMES_PER_CLIP=5, FRAME_MAX_DIM=640) or per-node central control. NB: 1 frame
+    # is a degenerate fallback that misses the temporal cue, so the floor is 3.
+    frames_per_clip: int = 3
     frame_max_dim: int = 320
     frame_jpeg_quality: int = 85
     # ffmpeg binary for clip cutting. Bare "ffmpeg" works when it's on PATH; set
