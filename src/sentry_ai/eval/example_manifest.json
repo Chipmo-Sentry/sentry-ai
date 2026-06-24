@@ -1,0 +1,8 @@
+{
+  "clips": [
+    { "path": "clips/2026-06-20_cam1_001.mp4", "label": "theft" },
+    { "path": "clips/2026-06-20_cam1_002.mp4", "label": "benign" },
+    { "path": "clips/2026-06-20_cam2_003.mp4", "label": "pocket_conceal" },
+    { "path": "clips/2026-06-20_cam2_004.mp4", "label": "browsing" }
+  ]
+}
