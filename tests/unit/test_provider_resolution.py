@@ -6,7 +6,7 @@ Priority: explicit request > central (backend-pushed, if known) > .env default.
 import pytest
 
 from sentry_ai import runtime_config
-from sentry_ai.providers.factory import resolve_provider_name
+from sentry_ai.providers.factory import provider_uses_ollama, resolve_provider_name
 from sentry_ai.settings import get_settings
 
 
@@ -37,3 +37,20 @@ def test_unknown_central_falls_back_to_env_default() -> None:
 
 def test_no_central_uses_env_default() -> None:
     assert resolve_provider_name(None) == get_settings().default_provider
+
+
+def test_ollama_provider_requires_ollama() -> None:
+    # Ollama-runtime providers (the default + alt) genuinely need Ollama.
+    assert provider_uses_ollama("qwen3-vl-4b") is True
+    assert provider_uses_ollama("minicpm-v-2.6") is True
+
+
+def test_vllm_provider_does_not_require_ollama() -> None:
+    # vLLM provider runs outside Ollama → a down Ollama is not a fault.
+    assert provider_uses_ollama("qwen3-vl-vllm") is False
+
+
+def test_unknown_or_unset_provider_assumes_ollama() -> None:
+    # Unknown/unset → conservative default so a real dependency is never hidden.
+    assert provider_uses_ollama("totally-made-up") is True
+    assert provider_uses_ollama(None) is True
