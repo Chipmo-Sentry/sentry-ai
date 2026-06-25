@@ -92,13 +92,24 @@ def _camera_health(workers: list[dict[str, Any]]) -> list[dict[str, object]]:
     return cams
 
 
+def _local_headers() -> dict[str, str]:
+    """Auth for the heartbeat process's localhost probes of the running app. When
+    AI_SERVICE_TOKEN gates the live endpoints (staging/production), the probes must
+    present it too — otherwise they 401 and the node silently reports empty
+    fps/cameras/provider, which breaks the cloud's node↔camera link + HLS proxy."""
+    from sentry_ai.settings import get_settings
+
+    tok = get_settings().ai_service_token
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
 def _worker_stats(client: httpx.Client) -> tuple[float, int, list[dict[str, object]] | None]:
     """(sum_fps, active_cameras, per_camera_health) read from the running app
     over HTTP, since the heartbeat process has no in-process live-worker manager
     of its own. The sum is kept for backward compat with older backends; the
     per-camera list is what lets the cloud tell WHICH camera died."""
     try:
-        r = client.get(_LOCAL_APP + "/v1/live/status", timeout=3.0)
+        r = client.get(_LOCAL_APP + "/v1/live/status", timeout=3.0, headers=_local_headers())
         workers = list(r.json().get("workers", []))
         running = [w for w in workers if w.get("running")]
         fps = sum(float(w.get("fps_inference") or 0.0) for w in running)
@@ -112,7 +123,7 @@ def _provider_status(client: httpx.Client) -> dict[str, object] | None:
     feedback). None if the app is momentarily unreachable. Reported so the dashboard
     can show 'applied on server' vs 'applying…' vs an error next to the provider."""
     try:
-        r = client.get(_LOCAL_APP + "/v1/live/provider", timeout=3.0)
+        r = client.get(_LOCAL_APP + "/v1/live/provider", timeout=3.0, headers=_local_headers())
         if r.status_code != 200:
             return None
         return dict(r.json())
