@@ -230,6 +230,15 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
         act = prov.get("activity")
         if isinstance(act, dict):
             payload["vlm_activity"] = act
+    # Whether Ollama is actually in the verify path for the effective provider. On a
+    # vLLM node this is False, so the dashboard can render the (expected) Ollama-down
+    # dot as neutral instead of a red alarm. Falls back to the bootstrap default when
+    # the live effective provider is momentarily unknown.
+    from sentry_ai.providers.factory import provider_uses_ollama
+
+    payload["ollama_required"] = provider_uses_ollama(
+        effective_provider or settings.default_provider
+    )
     # VLM GPU residency (resource breakdown) — matched to the effective provider so
     # the resident RAG embed model isn't misreported as the VLM.
     vlm = _vlm_status(client, settings, effective_provider)

@@ -24,6 +24,18 @@ def get_provider_class(name: str) -> type | None:
     return _REGISTRY.get(name)
 
 
+def provider_uses_ollama(name: str | None) -> bool:
+    """True when provider ``name`` runs on the Ollama runtime — i.e. Ollama being
+    down actually breaks verify. False for vLLM providers (there Ollama is not in the
+    verify path, so a red 'Ollama down' dot would be a false alarm). Unknown/unset
+    names fall back to the historical Ollama default so a real dependency is never
+    hidden; callers should pass an already-resolved provider name."""
+    cls = get_provider_class(name) if name else None
+    if cls is None:
+        return True
+    return getattr(cls, "runtime", "ollama") == "ollama"
+
+
 def resolve_provider_name(requested: str | None) -> str:
     """Pick the effective VLM provider (central control, ADR-0026).
 
