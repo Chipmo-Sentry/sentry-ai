@@ -17,6 +17,7 @@ from the running app. Bulletproof.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from typing import Any
@@ -239,6 +240,20 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
     payload["ollama_required"] = provider_uses_ollama(
         effective_provider or settings.default_provider
     )
+    # Externally-reachable MediaMTX HLS base, so the backend can proxy live HLS over
+    # HTTPS (the frontend is HTTPS; the node is HTTP → mixed-content otherwise) and
+    # always follow this node's CURRENT address. Derived from the vast.ai env
+    # (PUBLIC_IPADDR + the host port mapped to MediaMTX's 8888), so a vast restart
+    # that remaps the port self-heals with no hardcoded value. Explicit override via
+    # MEDIAMTX_PUBLIC_HLS_BASE wins (non-vast hosts).
+    hls_base = os.environ.get("MEDIAMTX_PUBLIC_HLS_BASE")
+    if not hls_base:
+        _ip = os.environ.get("PUBLIC_IPADDR")
+        _port = os.environ.get("VAST_TCP_PORT_8888")
+        if _ip and _port:
+            hls_base = f"http://{_ip}:{_port}"
+    if hls_base:
+        payload["mediamtx_hls_base"] = hls_base.rstrip("/")
     # VLM GPU residency (resource breakdown) — matched to the effective provider so
     # the resident RAG embed model isn't misreported as the VLM.
     vlm = _vlm_status(client, settings, effective_provider)
