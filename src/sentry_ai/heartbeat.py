@@ -265,6 +265,23 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
             hls_base = f"http://{_ip}:{_port}"
     if hls_base:
         payload["mediamtx_hls_base"] = hls_base.rstrip("/")
+    # MediaMTX paths this node is currently serving (ready streams), so the backend
+    # keeps the node↔camera link + HLS proxy working even when NO analysis worker
+    # runs — edge-first: the agent does YOLO/behaviour, the node only relays the
+    # stream + verifies edge clips on demand (docs/32 P3). Independent of the live
+    # worker's per-camera health.
+    try:
+        pr = client.get("http://127.0.0.1:9997/v3/paths/list", timeout=3.0)
+        if pr.status_code == 200:
+            served = [
+                str(p["name"])
+                for p in pr.json().get("items", [])
+                if p.get("ready") and p.get("name")
+            ]
+            if served:
+                payload["mediamtx_paths"] = served
+    except Exception:  # noqa: BLE001 — best-effort; MediaMTX API momentarily down
+        pass
     # VLM GPU residency (resource breakdown) — matched to the effective provider so
     # the resident RAG embed model isn't misreported as the VLM.
     vlm = _vlm_status(client, settings, effective_provider)
