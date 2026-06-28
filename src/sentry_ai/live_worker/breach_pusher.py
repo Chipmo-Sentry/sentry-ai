@@ -41,9 +41,14 @@ _POST_TIMEOUT_SEC = 15.0
 # unboundedly. This throttles the scan rate to the GPU's real throughput.
 _busy_lock = threading.Lock()
 _busy = False
-# Mirror of the backend's derive_alert_level "ignore" gate so the node never
-# pushes a verdict the backend would just drop.
-_IGNORE_CONF = 0.30
+# Mirror of the backend's evidence gate so the node only pushes clips that the
+# operator actually wants retained: theft or attempted theft, not browsing/cart.
+_THEFT_CATEGORIES = {"pocket_conceal", "bag_conceal"}
+_THEFT_SAVE_CONF = 0.50
+
+
+def _should_push_theft_clip(output: Any) -> bool:
+    return output.category.value in _THEFT_CATEGORIES and output.confidence >= _THEFT_SAVE_CONF
 
 
 def submit_breach(
@@ -241,20 +246,27 @@ async def _cut_verify_push(
         confidence=round(output.confidence, 2),
     )
 
-    # Surface EVERY sustained breach in the menu WITH its clip so the operator
-    # can review it — the VLM verdict only sets the alert LEVEL on the backend
-    # (theft → notify/review; browsing / low-confidence → log = "Бүртгэсэн"). We
-    # no longer DROP browsing here: a detected episode the human never sees is
-    # worse than a low-priority one they can glance at + dismiss. (Loss-
-    # prevention: the AI surfaces candidates; the human makes the call.)
-    if output.category.value == "browsing" or output.confidence < _IGNORE_CONF:
+    # Only retained clips should be theft/attempt evidence. For benign or
+    # unclear breaches, report a cleared episode and delete the local cut.
+    if not _should_push_theft_clip(output):
         log.info(
-            "breach_push.low_signal",
+            "breach_push.cleared_by_vlm",
             mediamtx_path=mediamtx_path,
             person_id=person_id,
             category=output.category.value,
             confidence=output.confidence,
         )
+        Path(cut.storage_path).unlink(missing_ok=True)  # noqa: ASYNC240
+        await _report_cleared(
+            mediamtx_path=mediamtx_path,
+            reason="vlm_cleared",
+            peak_risk_pct=peak_risk_pct,
+            person_id=person_id,
+            behaviors=behaviors,
+            category=output.category.value,
+            confidence=output.confidence,
+        )
+        return
 
     # Embedding is best-effort (RAG loop enrichment); never block the alert on it.
     embedding: list[float] | None = None

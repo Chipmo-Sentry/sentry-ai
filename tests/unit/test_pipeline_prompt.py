@@ -5,11 +5,14 @@ from sentry_ai.pipeline.prompt import render_prompt
 
 def test_render_verify_v1_default_context() -> None:
     rendered = render_prompt("verify_v1.j2")
+    assert "хулгай хийсэн эсвэл хулгай хийхийг завдсан" in rendered
+    assert "Зөвхөн дараах тохиолдлыг positive" in rendered
     assert "browsing" in rendered
     assert "cart_pickup" in rendered
     assert "pocket_conceal" in rendered
     assert "bag_conceal" in rendered
     assert "other" in rendered
+    assert '"actions":["pocket_conceal"]' in rendered
     # Default store context substituted
     assert "жирийн ритейл" in rendered
 
