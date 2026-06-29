@@ -67,6 +67,30 @@ def normalize_pose(kp: NDArray[np.float32]) -> NDArray[np.float32]:
     return norm
 
 
-def frame_features(kp: NDArray[np.float32]) -> NDArray[np.float32]:
-    """One pose → a flat (34,) feature vector for the model."""
+def normalize_by_bbox(
+    kp: NDArray[np.float32], bbox: tuple[float, float, float, float]
+) -> NDArray[np.float32]:
+    """(17,3)[x,y,conf] + bbox (x, y, w, h) → (17, 2) centred on the bbox centre,
+    scaled by bbox height. The bbox is present every frame, so this is far more
+    stable than a keypoint-derived torso scale (which collapses when shoulders/
+    hips are low-confidence). Verified on real PoseLift: torso-scale → AUC ~0.50,
+    bbox-scale → AUC ~0.70. Invalid joints (conf <= 0) collapse to the centre."""
+    x, y, w, h = (float(v) for v in bbox)
+    cx, cy = x + w / 2.0, y + h / 2.0
+    scale = h if h > _MIN_SCALE else max(w, 1.0)
+    xy = kp[:, :2].astype(np.float32).copy()
+    conf = kp[:, 2] if kp.shape[1] >= 3 else np.ones(COCO_17, dtype=np.float32)
+    out = (xy - np.array([cx, cy], dtype=np.float32)) / scale
+    out[conf <= 0.0] = 0.0
+    norm: NDArray[np.float32] = out.astype(np.float32)
+    return norm
+
+
+def frame_features(
+    kp: NDArray[np.float32], bbox: tuple[float, float, float, float] | None = None
+) -> NDArray[np.float32]:
+    """One pose → a flat (34,) feature vector. Prefer bbox normalisation (stable);
+    fall back to keypoint-derived normalisation when no bbox is available."""
+    if bbox is not None and bbox[3] > 0:
+        return normalize_by_bbox(kp, bbox).reshape(-1)
     return normalize_pose(kp).reshape(-1)

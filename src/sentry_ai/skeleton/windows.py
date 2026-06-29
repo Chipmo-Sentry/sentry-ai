@@ -45,7 +45,7 @@ def track_windows(track: PersonTrack, clip: PoseClip, length: int, stride: int) 
     frames = track.frames  # already sorted by frame_idx (loader guarantees)
     if len(frames) < MIN_FRAMES:
         return []
-    feats = [(fk.frame_idx, frame_features(fk.kp)) for fk in frames]
+    feats = [(fk.frame_idx, frame_features(fk.kp, fk.bbox)) for fk in frames]
 
     # Short track (MIN_FRAMES..length): one edge-padded window so brief tracks
     # still contribute. Pad timesteps carry frame_idx -1 → ignored by labels/eval.

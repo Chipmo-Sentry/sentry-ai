@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from sentry_ai.eval.pose_runner import build_pose_report, replay_clip
-from sentry_ai.eval.poselift import load_dataset
+from sentry_ai.eval.poselift import load_split
 from sentry_ai.skeleton.infer import evaluate, load_checkpoint
 from sentry_ai.skeleton.train import TrainConfig, export_onnx, save_checkpoint, train_autoencoder
 
@@ -48,10 +48,14 @@ def _print_comparison(learned: dict[str, Any], baseline: dict[str, Any]) -> None
 
 
 def _cmd_train(args: argparse.Namespace) -> int:
-    clips = load_dataset(Path(args.data))
-    print(f"Loaded {len(clips)} clips from {args.data}")
+    train_clips, test_clips = load_split(Path(args.data))
+    # Train on the normal (Train) split; if a dataset has no labelled split,
+    # train on everything. Eval on the labelled (Test) split.
+    fit_clips = train_clips or test_clips
+    eval_clips = test_clips or train_clips
+    print(f"Loaded {len(train_clips)} train (normal) + {len(test_clips)} test (labelled) clips")
     cfg = TrainConfig(length=args.window, stride=args.stride, epochs=args.epochs, seed=args.seed)
-    model, meta = train_autoencoder(clips, cfg, device=args.device, log=print)
+    model, meta = train_autoencoder(fit_clips, cfg, device=args.device, log=print)
     print(f"Trained on {meta['n_normal_windows']} normal windows; threshold={meta['threshold']:.6f}")
     save_checkpoint(model, meta, args.out)
     print(f"Saved checkpoint -> {args.out}")
@@ -63,8 +67,8 @@ def _cmd_train(args: argparse.Namespace) -> int:
             # The checkpoint is already saved; a missing export-only dep shouldn't
             # fail the whole run — just tell the user how to enable it.
             print(f"ONNX export skipped: {e}")
-    learned = evaluate(clips, model, meta, device=args.device)
-    _print_comparison(learned, _baseline_report(clips))
+    learned = evaluate(eval_clips, model, meta, device=args.device)
+    _print_comparison(learned, _baseline_report(eval_clips))
     if args.report:
         Path(args.report).write_text(json.dumps(learned, indent=2), encoding="utf-8")
         print(f"Wrote learned report -> {args.report}")
@@ -72,8 +76,9 @@ def _cmd_train(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
-    clips = load_dataset(Path(args.data))
-    print(f"Loaded {len(clips)} clips from {args.data}")
+    train_clips, test_clips = load_split(Path(args.data))
+    clips = test_clips or train_clips
+    print(f"Eval on {len(clips)} clips from {args.data}")
     model, meta = load_checkpoint(args.model, device=args.device)
     learned = evaluate(clips, model, meta, device=args.device)
     _print_comparison(learned, _baseline_report(clips))

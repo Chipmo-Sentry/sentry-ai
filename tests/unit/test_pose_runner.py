@@ -22,7 +22,7 @@ from sentry_ai.eval.pose_runner import (
     replay_clip,
     roc_auc,
 )
-from sentry_ai.eval.poselift import _to_kp17, load_clip
+from sentry_ai.eval.poselift import _to_kp17, load_clip, load_split
 
 
 def _standing_pose() -> np.ndarray:
@@ -167,12 +167,12 @@ def test_build_pose_report_keys_present():
 
 
 def test_load_clip_roundtrip(tmp_path: Path):
-    """A {person_id: {frame_id: {keypoints, bbox}}} pickle + .npy loads cleanly."""
-    pose = _standing_pose()
-    data = {
-        "1": {i: {"keypoints": pose, "bbox": [0, 0, 30, 200]} for i in range(6)},
-        "2": {i: {"keypoints": pose} for i in range(3)},
-    }
+    """A real-format {frame_idx: {person_id: [bbox, keypoints]}} pickle + .npy
+    loads cleanly: frame→person nesting is transposed, bbox xyxy→xywh."""
+    pose = _standing_pose()  # (17, 3)
+    bbox = [10, 20, 40, 220]  # [x1, y1, x2, y2]
+    data: dict = {i: {"1": [bbox, pose]} for i in range(6)}
+    data[0]["2"] = [bbox, pose]  # a second person on frame 0
     pkl = tmp_path / "cam1_001.pkl"
     with pkl.open("wb") as f:
         pickle.dump(data, f)
@@ -181,6 +181,26 @@ def test_load_clip_roundtrip(tmp_path: Path):
     clip = load_clip(pkl)
     assert clip.name == "cam1_001"
     assert clip.n_frames == 6  # from the .npy length
-    assert len(clip.persons) == 2
+    assert len(clip.persons) == 2  # transposed: persons "1" and "2"
     assert clip.label == "theft"  # the .npy has anomalous frames
     assert all(fk.kp.shape == (17, 3) for fk in clip.persons[0].frames)
+    # bbox converted [x1,y1,x2,y2] → (x, y, w, h)
+    assert clip.persons[0].frames[0].bbox == (10.0, 20.0, 30.0, 200.0)
+
+
+def test_load_split_separates_by_label_presence(tmp_path: Path):
+    """A clip with a matching .npy → TEST (labelled); without → TRAIN (normal).
+    Labels match by normalised (cam, vid), so zero-padding differences are fine."""
+    pose = _standing_pose()
+    frame = {"1": [[0, 0, 30, 200], pose]}
+    for name in ("1_222", "1_240"):  # two clips
+        with (tmp_path / f"{name}.pkl").open("wb") as f:
+            pickle.dump(dict.fromkeys(range(5), frame), f)
+    # Only 1_222 gets a label file — and it's zero-padded differently (01_0222).
+    np.save(tmp_path / "01_0222.npy", np.array([0, 1, 1, 0, 0]))
+
+    train, test = load_split(tmp_path)
+    assert {c.name for c in test} == {"1_222"}  # labelled → test
+    assert {c.name for c in train} == {"1_240"}  # no label → train (normal)
+    assert test[0].frame_labels is not None
+    assert train[0].frame_labels is None
