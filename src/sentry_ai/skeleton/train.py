@@ -99,6 +99,8 @@ def export_onnx(model: PoseAutoencoder, meta: dict[str, Any], path: str | Path) 
         import onnx  # type: ignore[import-not-found]  # noqa: F401 — export-only dep
     except ModuleNotFoundError as e:
         raise RuntimeError("ONNX export needs the 'onnx' package: uv pip install onnx") from e
+    import json
+
     model.eval()
     dummy = torch.zeros(1, int(meta["length"]), int(meta["feat_dim"]))
     torch.onnx.export(
@@ -113,4 +115,12 @@ def export_onnx(model: PoseAutoencoder, meta: dict[str, Any], path: str | Path) 
         # an extra dep we don't ship. The legacy path produces a standard ONNX that
         # OpenVINO consumes directly — all we need for the edge.
         dynamo=False,
+    )
+    # Sidecar meta the edge needs at inference (window length + anomaly threshold),
+    # so the agent doesn't have to load the torch .pt checkpoint.
+    sidecar = {
+        k: meta[k] for k in ("feat_dim", "length", "stride", "threshold") if k in meta
+    }
+    Path(path).with_suffix(".meta.json").write_text(
+        json.dumps(sidecar, indent=2), encoding="utf-8"
     )
