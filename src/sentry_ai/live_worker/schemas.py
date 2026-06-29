@@ -54,6 +54,22 @@ class TrackPayload(BaseModel):
     store_risk_pct: float | None = Field(default=None)
 
 
+class ItemPayload(BaseModel):
+    """One detected item (merchandise) in one frame, for the live overlay.
+
+    `held` marks an item a person's wrist is over (the 'in hand' geometry) so the
+    browser can highlight + name what's being carried. `label_mn` is the Mongolian
+    display name computed node-side so the frontend just renders text."""
+
+    box: tuple[float, float, float, float] = Field(
+        description="(x1, y1, x2, y2) in source frame pixels",
+    )
+    label: str = Field(description="Detector class label (English)")
+    label_mn: str = Field(description="Mongolian display name (falls back to label)")
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    held: bool = Field(default=False, description="A wrist is within reach of this item box")
+
+
 class FrameMetadata(BaseModel):
     """Per-analyzed-frame payload published to backend WS fanout."""
 
@@ -64,6 +80,8 @@ class FrameMetadata(BaseModel):
     height: int
     fps_inference: float = Field(description="Effective inference FPS (rolling)")
     tracks: list[TrackPayload] = Field(default_factory=list)
+    # Detected merchandise this frame (for the live overlay's held-item box+name).
+    items: list[ItemPayload] = Field(default_factory=list)
 
 
 # === Control API schemas ===
