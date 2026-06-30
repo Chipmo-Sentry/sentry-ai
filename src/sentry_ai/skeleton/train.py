@@ -96,7 +96,10 @@ def export_onnx(model: PoseAutoencoder, meta: dict[str, Any], path: str | Path) 
     Needs the export-only `onnx` package (not shipped — training/eval don't use
     it). Raises a clear RuntimeError if it's missing rather than a deep traceback."""
     try:
-        import onnx  # type: ignore[import-not-found]  # noqa: F401 — export-only dep
+        # onnx is an OPTIONAL export-only dep: the ignore is needed where it's not
+        # installed (CI) and harmless where it is (dev) — list both codes so mypy
+        # is happy in either environment.
+        import onnx  # type: ignore[import-not-found, unused-ignore]  # noqa: F401
     except ModuleNotFoundError as e:
         raise RuntimeError("ONNX export needs the 'onnx' package: uv pip install onnx") from e
     import json
