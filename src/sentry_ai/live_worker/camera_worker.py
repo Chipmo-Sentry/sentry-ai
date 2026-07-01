@@ -95,9 +95,7 @@ def item_label_mn(label: str) -> str:
     return ITEM_LABELS_MN.get(label.lower(), label)
 
 
-def _build_items_payload(
-    items: list[Item], tracked: list[TrackedDetection]
-) -> list[ItemPayload]:
+def _build_items_payload(items: list[Item], tracked: list[TrackedDetection]) -> list[ItemPayload]:
     """Detected items → overlay payload, flagging each one a wrist is over as
     `held` (the 'in hand' geometry), so the browser can box + name what's carried."""
     out: list[ItemPayload] = []
