@@ -722,7 +722,9 @@ class CameraWorker:
             )
             self._pose_history[t.tracker_id] = (dq, now)
         # Prune tracks idle past the TTL so the dict can't grow without bound.
-        for tid in [k for k, (_, ts) in self._pose_history.items() if now - ts > _POSE_HISTORY_TTL_SEC]:
+        for tid in [
+            k for k, (_, ts) in self._pose_history.items() if now - ts > _POSE_HISTORY_TTL_SEC
+        ]:
             del self._pose_history[tid]
 
     def _build_pose_sequence(self, tracker_id: int) -> list[dict[str, Any]]:
