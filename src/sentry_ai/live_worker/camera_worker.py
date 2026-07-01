@@ -21,7 +21,7 @@ from sentry_ai.live_worker import breach_pusher
 from sentry_ai.live_worker.behavior import BehaviorScorer, ScoreResult
 from sentry_ai.live_worker.emitter import MetadataEmitter
 from sentry_ai.live_worker.reid import Embedder, StorePersonRegistry
-from sentry_ai.live_worker.schemas import FrameMetadata, TrackPayload
+from sentry_ai.live_worker.schemas import FrameMetadata, ItemPayload, TrackPayload
 from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
 from sentry_ai.live_worker.yolo_det import Item, YoloItemRunner
 from sentry_ai.live_worker.yolo_runner import YoloPoseRunner
@@ -70,6 +70,61 @@ _TRAIL_MAXLEN = 32  # foot points kept per track for the trajectory trail
 _TRAIL_TTL_SEC = 3.0  # drop a track's trail this long after it vanishes
 _MASK_ALPHA = 0.40  # translucency of the pose-polygon body fill
 _ITEM_LINK_BGR = (0, 170, 255)  # amber wrist→item link (BGR)
+_ITEM_REACH_FRAC = 0.35  # wrist→item "holding" distance as a fraction of person height
+
+# Mongolian display names for detected items (mirrors agent-pc edge/overlay.py).
+# The live overlay shows WHAT is in a shopper's hand; computed node-side so the
+# browser just renders text. COCO item labels here (the cloud detector is COCO);
+# unmapped labels fall back to the raw English label.
+ITEM_LABELS_MN: dict[str, str] = {
+    "backpack": "үүргэвч",
+    "handbag": "гар цүнх",
+    "suitcase": "чемодан",
+    "bottle": "лонх",
+    "cup": "аяга",
+    "laptop": "зөөврийн компьютер",
+    "cell phone": "гар утас",
+    "book": "ном",
+    "box": "хайрцаг",
+    "can": "лааз",
+}
+
+
+def item_label_mn(label: str) -> str:
+    """Mongolian display name for a detected item, or the raw label if unmapped."""
+    return ITEM_LABELS_MN.get(label.lower(), label)
+
+
+def _build_items_payload(items: list[Item], tracked: list[TrackedDetection]) -> list[ItemPayload]:
+    """Detected items → overlay payload, flagging each one a wrist is over as
+    `held` (the 'in hand' geometry), so the browser can box + name what's carried."""
+    out: list[ItemPayload] = []
+    for it in items:
+        ix1, iy1, ix2, iy2 = it.box
+        held = False
+        for t in tracked:
+            reach = max(1.0, t.box[3] - t.box[1]) * _ITEM_REACH_FRAC
+            for widx in (_KP_L_WRI, _KP_R_WRI):
+                w = _kp_point(t.keypoints, widx)
+                if w is None:
+                    continue
+                nx = min(max(float(w[0]), ix1), ix2)
+                ny = min(max(float(w[1]), iy1), iy2)
+                if ((w[0] - nx) ** 2 + (w[1] - ny) ** 2) ** 0.5 <= reach:
+                    held = True
+                    break
+            if held:
+                break
+        out.append(
+            ItemPayload(
+                box=it.box,
+                label=it.label,
+                label_mn=item_label_mn(it.label),
+                confidence=float(it.score),
+                held=held,
+            )
+        )
+    return out
 
 
 def _risk_bgr(color: str) -> tuple[int, int, int]:
@@ -623,6 +678,7 @@ class CameraWorker:
             height=h,
             fps_inference=self.fps_inference,
             tracks=tracks_payload,
+            items=_build_items_payload(self._cached_items, tracked),
         )
         self._emitter.enqueue(payload)
 
