@@ -12,6 +12,7 @@ import contextlib
 import threading
 import time
 from collections import deque
+from typing import Any
 
 import cv2
 import numpy as np
@@ -125,6 +126,12 @@ def _build_items_payload(items: list[Item], tracked: list[TrackedDetection]) -> 
             )
         )
     return out
+
+# Фаз 0 pose-history capture (training data): keep ~this many analyzed frames per
+# track (~30 s at a ~5 fps analyzed rate), prune a track after this idle TTL.
+# Keypoints are rounded to 1 decimal to bound the JSON size of an alert.
+_POSE_HISTORY_MAXLEN = 150
+_POSE_HISTORY_TTL_SEC = 60.0
 
 
 def _risk_bgr(color: str) -> tuple[int, int, int]:
@@ -320,6 +327,10 @@ class CameraWorker:
         # Per-track foot-point history for the trajectory-trail overlay:
         # tracker_id → (recent points, last-updated wall-clock). Pruned by TTL.
         self._trail_hist: dict[int, tuple[deque[tuple[int, int]], float]] = {}
+        # Фаз 0 (ADR-0030): per-track rolling pose history → at breach we attach the
+        # breaching person's skeleton trajectory to the alert as training data.
+        # tracker_id → (deque of {frame_idx, ts_ms, keypoints, box}, last-update ts).
+        self._pose_history: dict[int, tuple[deque[dict[str, Any]], float]] = {}
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -552,6 +563,7 @@ class CameraWorker:
         self._frames_processed += 1
         self._detections_total += len(detections)
         self._persons_this_frame = len(detections)
+        self._capture_pose(tracked)  # Фаз 0: roll the per-track skeleton history
 
         # Throttled YOLO-filter heartbeat. captured vs processed ≈ frame_skip
         # confirms the skip gate; persons>0 when someone is in view confirms the
@@ -743,7 +755,38 @@ class CameraWorker:
             behavior_detail=detail,
             episode_started_ms=episode_ms,
             breach_ts_ms=int(time.time() * 1000),
+            pose_sequence=self._build_pose_sequence(tracker_id) or None,
         )
+
+    def _capture_pose(self, tracked: list[TrackedDetection]) -> None:
+        """Фаз 0: roll each present person's pose into the per-track history (skeleton
+        only — no pixels). At breach, the breaching track's window becomes the
+        alert's training data. Keypoints rounded to bound the stored JSON size."""
+        now = time.time()
+        for t in tracked:
+            if t.keypoints is None:
+                continue
+            entry = self._pose_history.get(t.tracker_id)
+            dq = entry[0] if entry is not None else deque(maxlen=_POSE_HISTORY_MAXLEN)
+            dq.append(
+                {
+                    "frame_idx": self._frames_total,
+                    "ts_ms": int(now * 1000),
+                    "keypoints": np.round(t.keypoints, 1).tolist(),
+                    "box": [round(float(v), 1) for v in t.box],
+                }
+            )
+            self._pose_history[t.tracker_id] = (dq, now)
+        # Prune tracks idle past the TTL so the dict can't grow without bound.
+        for tid in [
+            k for k, (_, ts) in self._pose_history.items() if now - ts > _POSE_HISTORY_TTL_SEC
+        ]:
+            del self._pose_history[tid]
+
+    def _build_pose_sequence(self, tracker_id: int) -> list[dict[str, Any]]:
+        """The breaching track's recent skeleton trajectory (oldest→newest), or []."""
+        entry = self._pose_history.get(tracker_id)
+        return list(entry[0]) if entry is not None else []
 
     def _update_snapshot(
         self,

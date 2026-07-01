@@ -61,6 +61,7 @@ def submit_breach(
     behavior_detail: list[dict[str, Any]],
     episode_started_ms: int | None,
     breach_ts_ms: int,
+    pose_sequence: list[dict[str, Any]] | None = None,
 ) -> None:
     """Fire-and-forget: queue a breach for cut+VLM+push. Never blocks the caller."""
     # Topology is backend-authoritative (ADR-0026): the node pushes only when the
@@ -85,6 +86,7 @@ def submit_breach(
         behavior_detail,
         episode_started_ms,
         breach_ts_ms,
+        pose_sequence,
     )
 
 
@@ -97,6 +99,7 @@ def _handle(
     behavior_detail: list[dict[str, Any]],
     episode_started_ms: int | None,
     breach_ts_ms: int,
+    pose_sequence: list[dict[str, Any]] | None = None,
 ) -> None:
     try:
         asyncio.run(
@@ -109,6 +112,7 @@ def _handle(
                 behavior_detail,
                 episode_started_ms,
                 breach_ts_ms,
+                pose_sequence,
             )
         )
     except Exception:  # noqa: BLE001 — a breach failure must never kill the worker
@@ -183,6 +187,7 @@ async def _cut_verify_push(
     behavior_detail: list[dict[str, Any]],
     episode_started_ms: int | None,
     breach_ts_ms: int,
+    pose_sequence: list[dict[str, Any]] | None = None,
 ) -> None:
     from sentry_ai import clip_cutter, rag
     from sentry_ai.pipeline.verifier import verify_clip
@@ -298,6 +303,9 @@ async def _cut_verify_push(
         "triggered_behaviors": behaviors or None,
         "triggered_sequences": sequences or None,
         "triggered_behavior_detail": behavior_detail or None,
+        # Фаз 0 (ADR-0030): the breaching person's skeleton trajectory → training
+        # data for the skeleton-anomaly model once staff verify this alert.
+        "pose_sequence": pose_sequence or None,
     }
     url = settings.sentry_backend_url.rstrip("/") + "/api/v1/internal/live-alert"
     headers = {
