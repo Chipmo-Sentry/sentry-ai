@@ -62,7 +62,9 @@ def _bbox_xywh(arr: Any) -> tuple[float, float, float, float] | None:
     return (x1, y1, x2 - x1, y2 - y1)
 
 
-def _kp_bbox(fv: Any) -> tuple[NDArray[np.float32], tuple[float, float, float, float] | None] | None:
+def _kp_bbox(
+    fv: Any,
+) -> tuple[NDArray[np.float32], tuple[float, float, float, float] | None] | None:
     """A PoseLift per-person frame value → ((17,3)[x,y,conf], bbox xywh|None).
 
     Real format is the 2-element list ``[bbox(4), keypoints(17,3)]``; also tolerate

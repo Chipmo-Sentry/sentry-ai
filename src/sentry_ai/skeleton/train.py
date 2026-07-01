@@ -121,9 +121,5 @@ def export_onnx(model: PoseAutoencoder, meta: dict[str, Any], path: str | Path) 
     )
     # Sidecar meta the edge needs at inference (window length + anomaly threshold),
     # so the agent doesn't have to load the torch .pt checkpoint.
-    sidecar = {
-        k: meta[k] for k in ("feat_dim", "length", "stride", "threshold") if k in meta
-    }
-    Path(path).with_suffix(".meta.json").write_text(
-        json.dumps(sidecar, indent=2), encoding="utf-8"
-    )
+    sidecar = {k: meta[k] for k in ("feat_dim", "length", "stride", "threshold") if k in meta}
+    Path(path).with_suffix(".meta.json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8")

@@ -16,10 +16,14 @@ from sentry_ai.skeleton.model import PoseAutoencoder, frame_errors
 from sentry_ai.skeleton.windows import clip_windows, stack_features
 
 
-def load_checkpoint(path: str | Path, *, device: str = "cpu") -> tuple[PoseAutoencoder, dict[str, Any]]:
+def load_checkpoint(
+    path: str | Path, *, device: str = "cpu"
+) -> tuple[PoseAutoencoder, dict[str, Any]]:
     ckpt = torch.load(Path(path), map_location=device, weights_only=True)
     meta = ckpt["meta"]
-    model = PoseAutoencoder(int(meta["feat_dim"]), int(meta["hidden"]), int(meta["latent"])).to(device)
+    model = PoseAutoencoder(int(meta["feat_dim"]), int(meta["hidden"]), int(meta["latent"])).to(
+        device
+    )
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     return model, meta

@@ -44,7 +44,9 @@ def _print_comparison(learned: dict[str, Any], baseline: dict[str, Any]) -> None
     if lr is not None and ba is not None:
         verdict = "BEATS" if lr > ba else "does NOT beat"
         print(f"  → learned model {verdict} the baseline ({lr} vs {ba})")
-    print(f"\n  (video-level peak AUC: learned={learned['peak_auc']} baseline={baseline['peak_auc']})")
+    print(
+        f"\n  (video-level peak AUC: learned={learned['peak_auc']} baseline={baseline['peak_auc']})"
+    )
 
 
 def _cmd_train(args: argparse.Namespace) -> int:
@@ -56,7 +58,9 @@ def _cmd_train(args: argparse.Namespace) -> int:
     print(f"Loaded {len(train_clips)} train (normal) + {len(test_clips)} test (labelled) clips")
     cfg = TrainConfig(length=args.window, stride=args.stride, epochs=args.epochs, seed=args.seed)
     model, meta = train_autoencoder(fit_clips, cfg, device=args.device, log=print)
-    print(f"Trained on {meta['n_normal_windows']} normal windows; threshold={meta['threshold']:.6f}")
+    print(
+        f"Trained on {meta['n_normal_windows']} normal windows; threshold={meta['threshold']:.6f}"
+    )
     save_checkpoint(model, meta, args.out)
     print(f"Saved checkpoint -> {args.out}")
     if args.onnx:
@@ -90,8 +94,11 @@ def _cmd_eval(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdout()
-    ap = argparse.ArgumentParser(prog="sentry_ai.skeleton", description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        prog="sentry_ai.skeleton",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     t = sub.add_parser("train", help="train the anomaly model on a PoseLift dir")
