@@ -115,6 +115,10 @@ LOITER_SECONDS = 30.0  # v2 spec default (was 8) — DB-tunable
 # Sequence engine: an ordered pattern must complete within this span to fire.
 SEQUENCE_WINDOW_SEC = 60.0
 _EVENT_HISTORY_CAP = 64
+# Cap the per-fire episode timeline (docs/33 Sprint C): a marathon episode
+# appended one row per banking event forever — O(n) rebuild per frame +
+# unbounded alert payloads. The newest rows win (the breakdown's tail).
+_EPISODE_EVENTS_CAP = 500
 
 # === Tunable engine params (ADR-0024 v2; hot-tuned from backend /api/v1/behaviors).
 # Global knobs — the backend ships these in the `engine` object; the poller calls
@@ -577,6 +581,14 @@ class BehaviorScorer:
                 del self._states[tid]
             return len(stale)
 
+    def active_track_ids(self) -> set[int]:
+        """Tracker ids with live per-track state — the caller's pruning anchor
+        (docs/33 Sprint C): side-tables keyed by tracker id (e.g. the worker's
+        _prev_raw) must not outlive the scorer state, or they grow forever with
+        ByteTrack's monotonically-increasing ids."""
+        with self._lock:
+            return set(self._states)
+
     # === Internal — single-frame heuristics ===
 
     def _smoothed(self, state: TrackState, key: str, active: bool) -> bool:
@@ -666,6 +678,8 @@ class BehaviorScorer:
             state.episode_behaviors[key] = state.episode_behaviors.get(key, 0.0) + amount
             state.episode_behavior_ts.setdefault(key, now)  # first firing wins
             state.episode_events.append((key, now, amount))  # per-fire breakdown
+            if len(state.episode_events) > _EPISODE_EVENTS_CAP:
+                del state.episode_events[:-_EPISODE_EVENTS_CAP]
             reasons.append(reason)
             fired.add(key)
 
@@ -950,6 +964,8 @@ class BehaviorScorer:
                 )
                 state.episode_behavior_ts.setdefault(rule.key, now)
                 state.episode_events.append((rule.key, now, bonus_val))
+                if len(state.episode_events) > _EPISODE_EVENTS_CAP:
+                    del state.episode_events[:-_EPISODE_EVENTS_CAP]
                 if rule.critical:
                     critical = True
         return bonus, awarded, critical

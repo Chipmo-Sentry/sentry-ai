@@ -36,6 +36,9 @@ COCO_ITEM_CLASSES: dict[int, str] = {
 }
 
 _MODEL_LOCK = threading.Lock()
+# docs/33 Sprint C — same predict-serialization as yolo_runner: the shared
+# ultralytics predictor is not thread-safe across camera threads.
+_PREDICT_LOCK = threading.Lock()
 _MODEL: object | None = None
 _DEVICE: str | None = None
 
@@ -87,14 +90,15 @@ class YoloItemRunner:
 
     def detect_items(self, frame_bgr: NDArray[np.uint8]) -> list[Item]:
         model, device = _load_model()
-        results = model.predict(  # type: ignore[attr-defined]
-            frame_bgr,
-            device=device,
-            conf=self.conf,
-            iou=self.iou,
-            classes=list(COCO_ITEM_CLASSES.keys()),
-            verbose=False,
-        )
+        with _PREDICT_LOCK:  # predictors aren't thread-safe across camera threads
+            results = model.predict(  # type: ignore[attr-defined]
+                frame_bgr,
+                device=device,
+                conf=self.conf,
+                iou=self.iou,
+                classes=list(COCO_ITEM_CLASSES.keys()),
+                verbose=False,
+            )
         if not results:
             return []
         r = results[0]

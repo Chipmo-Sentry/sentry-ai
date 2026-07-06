@@ -77,8 +77,14 @@ class BehaviorConfigPoller:
         on_weights: Callable[[dict[str, float]], None],
         on_thresholds: Callable[[float, float, float], None],
         on_params: Callable[[dict[str, float], dict[str, dict[str, float]]], None] | None = None,
-    ) -> None:
-        """Register callbacks; immediately invoked with last-known config if any."""
+    ) -> Callable[[], None]:
+        """Register callbacks; immediately invoked with last-known config if any.
+
+        Returns an UNSUBSCRIBE handle (docs/33 Sprint C): every camera restart
+        (zone/threshold/rtsp edit) creates a fresh worker + subscription, and
+        without removal the poller held every dead worker's callbacks forever —
+        a memory leak that also kept hot-applying config into orphaned scorers.
+        The manager calls the handle when the worker stops/restarts. Idempotent."""
         with self._lock:
             self._on_weights.append(on_weights)
             self._on_thresholds.append(on_thresholds)
@@ -90,6 +96,17 @@ class BehaviorConfigPoller:
                 on_thresholds(*self._last_thresholds)
             if on_params is not None and self._last_params is not None:
                 on_params(*self._last_params)
+
+        def _unsubscribe() -> None:
+            with self._lock:
+                if on_weights in self._on_weights:
+                    self._on_weights.remove(on_weights)
+                if on_thresholds in self._on_thresholds:
+                    self._on_thresholds.remove(on_thresholds)
+                if on_params is not None and on_params in self._on_params:
+                    self._on_params.remove(on_params)
+
+        return _unsubscribe
 
     def _run(self) -> None:
         settings = get_settings()

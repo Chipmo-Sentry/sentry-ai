@@ -23,6 +23,12 @@ log = get_logger("sentry_ai.live_worker.yolo")
 _MODEL_LOCK = threading.Lock()
 _MODEL: object | None = None
 _DEVICE: str | None = None
+# docs/33 Sprint C — ONE model is shared by every camera thread, but ultralytics
+# predictors keep per-call internal state and are NOT thread-safe: ≥2 cameras
+# predicting concurrently can corrupt results or crash. Serialize predict()
+# (costs ~nothing: a single GPU serializes the actual compute anyway, while a
+# per-worker model would multiply GPU memory).
+_PREDICT_LOCK = threading.Lock()
 
 # Person class index in COCO80 (YOLO default labels)
 PERSON_CLASS = 0
@@ -91,14 +97,15 @@ class YoloPoseRunner:
 
         # ultralytics expects HWC BGR ndarray or path; classes=[0] filters to persons
         # verbose=False suppresses per-frame stdout spam
-        results = model.predict(  # type: ignore[attr-defined]
-            frame_bgr,
-            device=device,
-            conf=self.conf,
-            iou=self.iou,
-            classes=[PERSON_CLASS],
-            verbose=False,
-        )
+        with _PREDICT_LOCK:  # predictors aren't thread-safe across camera threads
+            results = model.predict(  # type: ignore[attr-defined]
+                frame_bgr,
+                device=device,
+                conf=self.conf,
+                iou=self.iou,
+                classes=[PERSON_CLASS],
+                verbose=False,
+            )
 
         if not results:
             return []

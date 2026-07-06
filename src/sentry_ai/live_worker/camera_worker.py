@@ -9,6 +9,7 @@ Loop:
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 import time
 from collections import deque
@@ -32,6 +33,18 @@ from sentry_ai.runtime_config import get_detection
 from sentry_ai.settings import get_settings
 
 log = get_logger("sentry_ai.live_worker.camera")
+
+# docs/33 Sprint C — RTSP over TCP + a hard socket timeout. Without rw_timeout a
+# wedged TCP session (camera reboot mid-stream, NAT drop) blocks cap.read()
+# FOREVER: the worker shows "stalled" and never reconnects. 10 s of socket
+# silence now errors the read → the existing reopen loop recovers. OpenCV reads
+# this env when a VideoCapture is CONSTRUCTED (not at import), so setting it at
+# module load — before any worker opens a capture — is early enough. setdefault
+# keeps an operator's own override intact. Mirrors sentry-agent-pc.
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "rtsp_transport;tcp|rw_timeout;10000000",  # µs → 10 s
+)
 
 # Rolling window for FPS smoothing
 _FPS_WINDOW_SEC = 5.0
@@ -126,6 +139,7 @@ def _build_items_payload(items: list[Item], tracked: list[TrackedDetection]) -> 
             )
         )
     return out
+
 
 # Фаз 0 pose-history capture (training data): keep ~this many analyzed frames per
 # track (~30 s at a ~5 fps analyzed rate), prune a track after this idle TTL.
@@ -675,9 +689,11 @@ class CameraWorker:
         if self._frames_total - self._last_cleanup_frame > 30:
             self._scorer.cleanup_stale()
             self._last_cleanup_frame = self._frames_total
-            # Prune the per-person scan cooldown map with the same staleness rule
-            # the old breach state used, so it can't grow with ByteTrack's
-            # monotonically-increasing ids.
+            # Prune per-track side-tables so they can't grow with ByteTrack's
+            # monotonically-increasing ids (docs/33 Sprint C): _prev_raw follows
+            # the scorer's live states; the scan-cooldown map uses staleness.
+            live_ids = self._scorer.active_track_ids()
+            self._prev_raw = {k: v for k, v in self._prev_raw.items() if k in live_ids}
             stale_scans = [tid for tid, ts in self._scan_last_by_tid.items() if now - ts > 300.0]
             for tid in stale_scans:
                 del self._scan_last_by_tid[tid]

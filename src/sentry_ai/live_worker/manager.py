@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from functools import lru_cache
 
 from sentry_ai.live_worker.camera_worker import CameraWorker
@@ -19,6 +20,9 @@ log = get_logger("sentry_ai.live_worker.manager")
 class LiveWorkerManager:
     def __init__(self) -> None:
         self._workers: dict[str, CameraWorker] = {}
+        # Per-camera config-poller unsubscribe handles (docs/33 Sprint C) — must
+        # be called on stop/restart or the poller leaks dead workers' callbacks.
+        self._unsubs: dict[str, Callable[[], None]] = {}
         self._lock = threading.Lock()
         self._emitter = MetadataEmitter()
         self._emitter_started = False
@@ -62,6 +66,9 @@ class LiveWorkerManager:
                     log.info("manager.already_running", camera_id=camera_id)
                     return
                 existing.stop()
+                # Drop the old worker's poller callbacks BEFORE re-subscribing —
+                # otherwise every restart leaks a set (docs/33 Sprint C).
+                self._unsubs.pop(camera_id, lambda: None)()
 
             registry = self._get_registry(store_id) if store_id else None
             worker = CameraWorker(
@@ -80,7 +87,9 @@ class LiveWorkerManager:
 
             # Subscribe worker's scorer to live config updates (callbacks invoke
             # synchronously on the poller thread — both methods are thread-safe).
-            get_config_poller().subscribe(
+            # Keep the unsubscribe handle: it MUST run when this worker stops or
+            # is replaced, or the poller accumulates dead workers forever.
+            self._unsubs[camera_id] = get_config_poller().subscribe(
                 on_weights=worker.apply_weights,
                 on_thresholds=worker.apply_thresholds,
                 on_params=worker.apply_params,
@@ -92,6 +101,7 @@ class LiveWorkerManager:
             # from /v1/live/status instead of lingering as a dead "error" worker
             # — which would false-alarm the per-camera health watchdog (T12 #3).
             worker = self._workers.pop(camera_id, None)
+            self._unsubs.pop(camera_id, lambda: None)()
             if worker is None:
                 return False
             worker.stop()
@@ -102,6 +112,9 @@ class LiveWorkerManager:
             for w in self._workers.values():
                 w.stop()
             self._workers.clear()
+            for unsub in self._unsubs.values():
+                unsub()
+            self._unsubs.clear()
             if self._emitter_started:
                 self._emitter.stop()
                 get_config_poller().stop()
