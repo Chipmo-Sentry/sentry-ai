@@ -236,6 +236,27 @@ async def _cut_verify_push(
         output, latency_ms, _frames = await verify_clip(
             clip_path=Path(cut.storage_path), provider=provider, store_context=None
         )
+    except Exception as e:  # noqa: BLE001 — docs/33 P0-5: a VLM outage must not orphan
+        # Transport/unexpected VLM failure (verify_clip already retried a cold
+        # load once with an extended timeout). Pre-fix this propagated to
+        # _handle's catch-all: the cut clip stayed on disk forever (temp-dir
+        # fill during any VLM outage) and the miss was invisible. Delete the
+        # clip + surface the miss on the activity timeline as a cleared breach.
+        log.warning(
+            "breach_push.vlm_error",
+            mediamtx_path=mediamtx_path,
+            person_id=person_id,
+            error=str(e)[:200],
+        )
+        Path(cut.storage_path).unlink(missing_ok=True)  # noqa: ASYNC240
+        await _report_cleared(
+            mediamtx_path=mediamtx_path,
+            reason="vlm_error",
+            peak_risk_pct=peak_risk_pct,
+            person_id=person_id,
+            behaviors=behaviors,
+        )
+        return
     finally:
         await client.aclose()
     # Split the scan latency so we can SEE where the time goes: total verify wall
@@ -312,12 +333,17 @@ async def _cut_verify_push(
         "Authorization": f"Bearer {settings.sentry_backend_service_token}",
         "Content-Type": "application/json",
     }
-    try:
-        async with httpx.AsyncClient(timeout=_POST_TIMEOUT_SEC) as client_http:
-            r = await client_http.post(url, json=payload, headers=headers)
-            if r.status_code >= 400:
-                log.warning("breach_push.post_failed", status=r.status_code, body=r.text[:200])
-            else:
+    # docs/33 P0-5: the alert POST used to be single-shot — a transient backend
+    # blip / slow uplink dropped the ALERT (verdict + evidence clip) forever.
+    # Retry once after a short backoff; retry 5xx too (4xx is a permanent
+    # rejection, don't repeat it). A doubled timeout on the retry gives a slow
+    # store uplink room to move the multi-MB clip payload.
+    for attempt in (0, 1):
+        try:
+            timeout = _POST_TIMEOUT_SEC * (2 if attempt else 1)
+            async with httpx.AsyncClient(timeout=timeout) as client_http:
+                r = await client_http.post(url, json=payload, headers=headers)
+            if r.status_code < 400:
                 log.info(
                     "breach_push.posted",
                     mediamtx_path=mediamtx_path,
@@ -325,5 +351,22 @@ async def _cut_verify_push(
                     category=output.category.value,
                     confidence=output.confidence,
                 )
-    except httpx.HTTPError:
-        log.warning("breach_push.post_error", mediamtx_path=mediamtx_path, exc_info=True)
+                return
+            log.warning("breach_push.post_failed", status=r.status_code, body=r.text[:200])
+            if r.status_code < 500:
+                return  # permanent rejection — retrying can't help
+        except httpx.HTTPError:
+            log.warning(
+                "breach_push.post_error",
+                mediamtx_path=mediamtx_path,
+                attempt=attempt,
+                exc_info=True,
+            )
+        if attempt == 0:
+            await asyncio.sleep(5.0)
+    log.error(
+        "breach_push.post_dropped",  # both attempts failed — alert + clip LOST
+        mediamtx_path=mediamtx_path,
+        person_id=person_id,
+        category=output.category.value,
+    )

@@ -37,16 +37,22 @@ def _neutral() -> np.ndarray:
     return k
 
 
-def _conceal(scorer: BehaviorScorer, tid: int = 1) -> None:
-    """Drive a pickup (sets holding) then a wrist-on-hip frame → pocket_interaction
-    (a concealment criterion banks into the episode)."""
+def _conceal(scorer: BehaviorScorer, clock: FakeClock, tid: int = 1) -> None:
+    """Drive a pickup (sets holding) then SUSTAINED wrist-on-hip contact →
+    pocket_interaction. docs/33 P0-3: the time-based contact gate needs
+    >= min_hold_sec (0.4 s) of continuous contact before banking — a single
+    frame no longer fires (that per-frame banking was the AUC-0.39 bug)."""
     k = _neutral()
     k[L_WRIST] = (200, 150, 1.0)
     item = Item(label="cell phone", box=(180, 130, 220, 170), score=0.9)
     scorer.score(tid, k, PERSON_H, items=[item])
     kp = _neutral()
     kp[L_WRIST] = (92, 300, 1.0)  # on the left hip → pocket_interaction
-    r = scorer.score(tid, kp, PERSON_H, items=[])
+    r = None
+    for _ in range(4):  # 0.8 s of sustained contact > min_hold_sec
+        clock.advance(0.2)
+        r = scorer.score(tid, kp, PERSON_H, items=[])
+    assert r is not None
     assert "pocket_interaction" in r.behaviors
 
 
@@ -54,8 +60,9 @@ def _conceal(scorer: BehaviorScorer, tid: int = 1) -> None:
 
 
 def test_exit_after_concealment_fires_and_alerts() -> None:
-    scorer = BehaviorScorer(clock=FakeClock())
-    _conceal(scorer)
+    clock = FakeClock()
+    scorer = BehaviorScorer(clock=clock)
+    _conceal(scorer, clock)
     r = scorer.score(1, _neutral(), PERSON_H, in_zones={"exit"})
     assert "exit_after_concealment" in r.behaviors
     assert r.state == BehaviorState.ALERT
@@ -69,8 +76,9 @@ def test_exit_without_prior_concealment_does_not_fire() -> None:
 
 
 def test_exit_after_concealment_banks_once() -> None:
-    scorer = BehaviorScorer(clock=FakeClock())
-    _conceal(scorer)
+    clock = FakeClock()
+    scorer = BehaviorScorer(clock=clock)
+    _conceal(scorer, clock)
     r1 = scorer.score(1, _neutral(), PERSON_H, in_zones={"exit"})
     banked = r1.behavior_scores["exit_after_concealment"]
     r2 = scorer.score(1, _neutral(), PERSON_H, in_zones={"exit"})
@@ -150,8 +158,9 @@ def test_repeated_shelf_visit_not_rebanked_on_later_entries() -> None:
 
 
 def test_no_zones_means_no_zone_criteria() -> None:
-    scorer = BehaviorScorer(clock=FakeClock())
-    _conceal(scorer)
+    clock = FakeClock()
+    scorer = BehaviorScorer(clock=clock)
+    _conceal(scorer, clock)
     # No in_zones passed (camera has no zones) → zone criteria never fire.
     r = scorer.score(1, _neutral(), PERSON_H)
     assert "exit_after_concealment" not in r.behaviors

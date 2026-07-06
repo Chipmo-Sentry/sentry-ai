@@ -254,9 +254,10 @@ class CameraWorker:
         # The frame_skip actually applied on the latest read (effective value, for
         # the yolo_stats log + heartbeat). Starts at the constructor fallback.
         self._active_frame_skip = self.frame_skip
-        # Per-camera breach threshold (0-100) from the backend. None → fall back to
-        # the node-global default. This is THE threshold the node fires breaches at;
-        # before this the backend's per-camera risk_threshold was ignored entirely.
+        # Per-camera scan floor (0-100) from the backend (risk_threshold). None →
+        # fall back to the node-global default. Since the VLM-primary pivot this
+        # gates which people are ELIGIBLE for the periodic VLM scan (docs/33 P0-4)
+        # — it no longer fires alerts directly (the VLM decides those).
         self.alert_threshold_pct = alert_threshold_pct
         self.yolo_conf = yolo_conf
         self._emitter = emitter
@@ -308,10 +309,13 @@ class CameraWorker:
         self._alert_threshold_pct = (
             alert_threshold_pct if alert_threshold_pct is not None else _s.live_alert_threshold_pct
         )
-        self._breach_sustain_sec = _s.live_breach_sustain_sec
-        self._breach_cooldown_sec = _s.live_breach_cooldown_sec
-        # tracker_id -> {above_since, last_breach, peak, last_seen} (monotonic ts)
-        self._breach_state: dict[int, dict[str, float]] = {}
+        # docs/33 P0-4 — scan cost controls: the scan only considers people at or
+        # above _alert_threshold_pct (re-wiring the previously-dead per-camera
+        # risk_threshold as the scan FLOOR), and the same person is not re-scanned
+        # within this cooldown. GPU spend now scales with suspicion, not foot
+        # traffic (previously: risk-0 shoppers were VLM-scanned every 3 s, 24/7).
+        self._scan_person_cooldown = max(0.0, _s.live_scan_person_cooldown_sec)
+        self._scan_last_by_tid: dict[int, float] = {}
 
         # Config delivered by poller BEFORE scorer initializes — buffer and
         # apply once scorer is live (fixes config-poller race condition).
@@ -594,7 +598,7 @@ class CameraWorker:
 
         # v2 behavior engine per tracked person → risk_pct + level + state + color
         tracks_payload: list[TrackPayload] = []
-        best_scan: tuple[float, int, ScoreResult] | None = None
+        scan_candidates: list[tuple[float, int, ScoreResult]] = []
         for t in tracked:
             person_h = max(1.0, t.box[3] - t.box[1])
             # docs/29 P1c — which zone type(s) the person's FOOT point is inside.
@@ -659,28 +663,40 @@ class CameraWorker:
                 ),
             )
 
-            # VLM-primary: remember the most-suspicious PRESENT person; the
-            # periodic scan below hands them to the VLM (the AI decides — the
-            # behaviour engine no longer GATES alerts, it only prioritises).
-            if best_scan is None or risk_pct > best_scan[0]:
-                best_scan = (risk_pct, t.tracker_id, result)
+            # VLM-primary: collect scan CANDIDATES — people at or above the scan
+            # floor (docs/33 P0-4: the per-camera risk_threshold, previously a
+            # dead knob). The periodic scan below picks the most suspicious
+            # eligible one (per-person cooldown applies); the AI decides — the
+            # behaviour engine no longer GATES alerts, it only prioritises.
+            if risk_pct >= self._alert_threshold_pct:
+                scan_candidates.append((risk_pct, t.tracker_id, result))
 
         # Periodic stale-track cleanup (~once per second @ 5 FPS)
         if self._frames_total - self._last_cleanup_frame > 30:
             self._scorer.cleanup_stale()
             self._last_cleanup_frame = self._frames_total
-            stale_breach = [
-                tid for tid, bs in self._breach_state.items() if now - bs["last_seen"] > 300.0
-            ]
-            for tid in stale_breach:
-                del self._breach_state[tid]
+            # Prune the per-person scan cooldown map with the same staleness rule
+            # the old breach state used, so it can't grow with ByteTrack's
+            # monotonically-increasing ids.
+            stale_scans = [tid for tid, ts in self._scan_last_by_tid.items() if now - ts > 300.0]
+            for tid in stale_scans:
+                del self._scan_last_by_tid[tid]
 
-        # VLM-primary periodic scan: every scan_interval, hand the most-suspicious
-        # PRESENT person to the VLM. breach_pusher skips the tick if the GPU is
-        # still busy on the previous scan (throttles to real VLM throughput).
-        if best_scan is not None and now - self._last_scan >= self._scan_interval:
-            self._last_scan = now
-            self._submit_breach(best_scan[1], best_scan[0], best_scan[2])
+        # VLM-primary periodic scan (docs/33 P0-4): every scan_interval, hand the
+        # most-suspicious ELIGIBLE person to the VLM — at/above the scan floor
+        # (collected above) and not scanned within the per-person cooldown. A tick
+        # with no eligible candidate submits nothing (idle store = idle GPU).
+        # breach_pusher still drops ticks while the GPU is busy.
+        if scan_candidates and now - self._last_scan >= self._scan_interval:
+            scan_candidates.sort(key=lambda c: c[0], reverse=True)
+            for risk, tid, res in scan_candidates:
+                last = self._scan_last_by_tid.get(tid)
+                if last is not None and now - last < self._scan_person_cooldown:
+                    continue
+                self._last_scan = now
+                self._scan_last_by_tid[tid] = now
+                self._submit_breach(tid, risk, res)
+                break
 
         payload = FrameMetadata(
             camera_id=self.camera_id,
@@ -696,34 +712,6 @@ class CameraWorker:
 
         # Update annotated snapshot for /v1/live/snapshot/{cam} debug viewer
         self._update_snapshot(frame_bgr, tracked, tracks_payload)
-
-    def _maybe_breach(
-        self, tracker_id: int, risk_pct: float, result: ScoreResult, now: float
-    ) -> None:
-        """Per-person sustain timer + cooldown. On a confirmed sustained breach,
-        hand the episode to breach_pusher (cut + VLM + POST to backend). Mirrors
-        the backend threshold_handler so behaviour is identical, just node-side."""
-        bs = self._breach_state.setdefault(
-            tracker_id, {"active": 0.0, "last_breach": 0.0, "peak": 0.0, "last_seen": 0.0}
-        )
-        bs["last_seen"] = now
-        if now - bs["last_breach"] < self._breach_cooldown_sec:
-            return
-        if risk_pct < self._alert_threshold_pct:
-            bs["active"] = 0.0
-            return
-        bs["peak"] = max(bs["peak"], risk_pct)
-        if bs["active"] == 0.0:
-            bs["active"] = now  # first frame above threshold
-            return
-        if now - bs["active"] < self._breach_sustain_sec:
-            return  # not sustained long enough yet
-        # Confirmed sustained breach.
-        peak = bs["peak"]
-        bs["last_breach"] = now
-        bs["active"] = 0.0
-        bs["peak"] = 0.0
-        self._submit_breach(tracker_id, peak, result)
 
     def _submit_breach(self, tracker_id: int, peak_risk_pct: float, result: ScoreResult) -> None:
         # Per-FIRE breakdown (each +score increment is its own row). Fall back to

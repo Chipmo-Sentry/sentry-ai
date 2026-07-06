@@ -9,6 +9,7 @@ import numpy as np
 
 from sentry_ai.live_worker.behavior import (
     DEFAULT_GREEN_MAX,
+    DEFAULT_WEIGHTS,
     DEFAULT_YELLOW_MAX,
     MIN_KP_CONF,
     SMOOTH_FRAMES,
@@ -185,6 +186,38 @@ def test_no_item_no_pickup() -> None:
 
 
 # === bag / pocket detectors ===
+#
+# Since the docs/33 P0-3 banking fix, bag/pocket bank through a TIME-based
+# contact gate (min_hold_sec=0.4 of continuous contact, then once per
+# interval_sec, capped per stint) — so these tests drive a controllable clock
+# and SUSTAIN the contact pose instead of asserting on a single frame.
+
+
+def _clocked_scorer(
+    weights: dict[str, float] | None = None,
+) -> tuple[BehaviorScorer, list[float]]:
+    """Scorer with a synthetic, manually-advanced wall clock."""
+    t = [0.0]
+    return BehaviorScorer(weights, clock=lambda: t[0]), t
+
+
+def _sustain(
+    scorer: BehaviorScorer,
+    t: list[float],
+    kp: np.ndarray,
+    items: list[Item],
+    *,
+    seconds: float = 0.8,
+    dt: float = 0.2,
+    tid: int = 1,
+) -> ScoreResult:
+    """Score the same pose repeatedly while advancing the clock; last result."""
+    r: ScoreResult | None = None
+    for _ in range(max(1, int(seconds / dt))):
+        t[0] += dt
+        r = scorer.score(tid, kp, PERSON_H, items=items)
+    assert r is not None
+    return r
 
 
 def _pick_up(scorer: BehaviorScorer, tid: int = 1) -> None:
@@ -196,21 +229,21 @@ def _pick_up(scorer: BehaviorScorer, tid: int = 1) -> None:
 
 
 def test_bag_interaction_when_holding() -> None:
-    scorer = BehaviorScorer()
+    scorer, t = _clocked_scorer()
     _pick_up(scorer)
     k = _neutral()
     k[L_WRIST] = (400, 250, 1.0)
     bag = Item(label="handbag", box=(380, 230, 440, 290), score=0.8)
-    r = scorer.score(1, k, PERSON_H, items=[bag])
+    r = _sustain(scorer, t, k, [bag])  # 0.8 s of contact > min_hold_sec
     assert "Гар уут руу" in r.reasons
 
 
 def test_pocket_interaction_when_holding() -> None:
-    scorer = BehaviorScorer()
+    scorer, t = _clocked_scorer()
     _pick_up(scorer)
     k = _neutral()
     k[L_WRIST] = (92, 300, 1.0)  # right on the left hip keypoint
-    r = scorer.score(1, k, PERSON_H, items=[])
+    r = _sustain(scorer, t, k, [])
     assert "Халаас руу" in r.reasons
 
 
@@ -218,12 +251,59 @@ def test_pocket_interaction_fires_without_holding_by_default() -> None:
     """The fix: pocketing a NON-COCO retail item leaves `holding` False (no COCO
     pickup), yet hand-to-pocket is itself the concealment signal — so it must
     fire on geometry alone (require_holding defaults to 0)."""
-    scorer = BehaviorScorer()
+    scorer, t = _clocked_scorer()
     k = _neutral()
     k[L_WRIST] = (92, 300, 1.0)  # on the left hip, NO prior pickup
-    r = scorer.score(1, k, PERSON_H, items=[])
+    r = _sustain(scorer, t, k, [])
     assert "Халаас руу" in r.reasons
     assert scorer._states[1].holding is False  # fired with no COCO item pickup
+
+
+def test_single_frame_wrist_at_hip_does_not_bank() -> None:
+    """docs/33 P0-3: an incidental wrist-passes-hip (single frame, < min_hold_sec)
+    must NOT bank — this was the per-frame-banking false-positive engine."""
+    scorer, _t = _clocked_scorer()
+    k = _neutral()
+    k[L_WRIST] = (92, 300, 1.0)
+    r = scorer.score(1, k, PERSON_H, items=[])
+    assert "Халаас руу" not in r.reasons
+    assert r.risk_pct == 0.0
+
+
+def test_resting_hand_at_hip_never_saturates() -> None:
+    """docs/33 P0-3 REGRESSION: a person standing with a hand resting at the hip
+    for a full minute must plateau at ~weight × max_banks_per_contact (MEDIUM-ish),
+    NOT ratchet to 100. Pre-fix this hit 100 in ~2 s (the PoseLift AUC-0.39 root
+    cause: every benign clip peaked at 100, indistinguishable from theft)."""
+    scorer, t = _clocked_scorer()
+    k = _neutral()
+    k[L_WRIST] = (92, 300, 1.0)  # resting on the hip, continuously
+    peak = 0.0
+    for _ in range(300):  # 60 s at 5 fps
+        t[0] += 0.2
+        r = scorer.score(1, k, PERSON_H, items=[])
+        peak = max(peak, r.risk_pct)
+    cap = DEFAULT_WEIGHTS["pocket_interaction"] * 3  # max_banks_per_contact
+    assert peak <= cap + 10, f"peak {peak} — resting hand must not saturate"
+    assert peak < 70, "resting hand must stay below the HIGH visual band"
+
+
+def test_repeated_pocket_reaches_rebank_per_stint() -> None:
+    """A REAL repeated pocketing motion (contact broken between reaches) banks
+    again on each new stint — the gate caps dwell, not distinct reaches."""
+    scorer, t = _clocked_scorer()
+    reach = _neutral()
+    reach[L_WRIST] = (92, 300, 1.0)
+    away = _neutral()
+    away[L_WRIST] = (60, 180, 1.0)  # hand away from the hip
+    for _ in range(3):  # three distinct reaches, ~3 s apart
+        _sustain(scorer, t, reach, [], seconds=0.8)
+        _sustain(scorer, t, away, [], seconds=2.2)
+    st = scorer._states[1]
+    banked = st.episode_behaviors.get("pocket_interaction", 0.0)
+    assert banked >= DEFAULT_WEIGHTS["pocket_interaction"] * 2, (
+        f"distinct reaches must re-bank (got {banked})"
+    )
 
 
 def test_require_holding_param_restores_strict_pocket_gate() -> None:
@@ -304,16 +384,18 @@ def test_pickup_then_wrist_awards_sequence_bonus() -> None:
 
 
 def test_concealment_sequence_is_critical_alert() -> None:
-    scorer = BehaviorScorer()
+    scorer, t = _clocked_scorer()
     _pick_up(scorer)
     k = _neutral()
     k[L_WRIST] = (100, 200, 1.0)  # chest (between shoulders) → wrist_to_torso
     for _ in range(8):  # → wrist_to_torso event
+        t[0] += 0.2
         scorer.score(1, k, PERSON_H, items=[])
-    # Now hide in the pocket (conceal_hide finisher).
+    # Now hide in the pocket (conceal_hide finisher) — sustained past the
+    # contact gate's min_hold_sec (docs/33 P0-3).
     kp = _neutral()
     kp[L_WRIST] = (92, 300, 1.0)
-    r = scorer.score(1, kp, PERSON_H, items=[])
+    r = _sustain(scorer, t, kp, [])
     assert "concealment_sequence" in r.sequences
     assert r.state == BehaviorState.ALERT
     assert r.level == "CRITICAL"

@@ -142,7 +142,33 @@ DEFAULT_DETECTOR_PARAMS: dict[str, dict[str, float]] = {
     "body_block": {"collapse_frac": 0.55, "ema_alpha": 0.1},
     "crouch": {"frac": 0.15, "hold_floor": 5.0},
     "wrist_to_torso": {"frac": 0.15, "cadence": 8.0},
-    "pocket_interaction": {"radius_frac": 0.12},
+    # docs/33 P0-3 (banking fix): bag/pocket used to bank their full weight EVERY
+    # analyzed frame of geometric contact — hands resting at the hips (a normal
+    # standing posture) saturated risk_pct to 100 in ~2 s, which is why the
+    # PoseLift baseline scored AUC 0.39 (benign == theft == 100). They now bank
+    # through a TIME-based contact gate (mirrors the edge agent's v0.7.53 timing
+    # gates, so scoring is frame-rate independent):
+    #   min_hold_sec — continuous contact required before the FIRST bank
+    #                  (filters incidental wrist-passes-hip while walking);
+    #   interval_sec — at most one bank per this many seconds thereafter;
+    #   max_banks_per_contact — cap per continuous contact stint, so a person
+    #                  standing with a hand resting at the hip tops out at
+    #                  ~weight×cap (MEDIUM band) instead of ratcheting to 100.
+    #                  A REAL repeated pocketing motion breaks contact between
+    #                  reaches → each new stint banks again (signal preserved).
+    # Set min_hold_sec=0, interval_sec=0, max_banks_per_contact=999 to restore
+    # the old ungated behaviour. All DB-tunable via /api/v1/behaviors.
+    "pocket_interaction": {
+        "radius_frac": 0.12,
+        "min_hold_sec": 0.4,
+        "interval_sec": 2.0,
+        "max_banks_per_contact": 3.0,
+    },
+    "bag_interaction": {
+        "min_hold_sec": 0.4,
+        "interval_sec": 2.0,
+        "max_banks_per_contact": 3.0,
+    },
     "rapid_movement": {"frac": 0.08},
     "loitering": {"seconds": LOITER_SECONDS},
     # docs/29 P1c — distinct shelf-zone entries before the criterion banks.
@@ -301,6 +327,13 @@ class TrackState:
     last_sequences: list[str] = field(default_factory=list)
     # Temporal smoothing: consecutive-frame counters per noisy dim.
     streak: dict[str, int] = field(default_factory=dict)
+    # docs/33 P0-3 — time-based contact gate (bag/pocket): when the current
+    # continuous contact stint started, how many times it has banked, and the
+    # last bank ts. since/banks reset when contact breaks; last_bank persists as
+    # a cross-stint rate limiter (a flickering hit can't re-bank instantly).
+    contact_since: dict[str, float] = field(default_factory=dict)
+    contact_banks: dict[str, int] = field(default_factory=dict)
+    contact_last_bank: dict[str, float] = field(default_factory=dict)
     # Sequence engine: ordered (behavior_key, ts) history + awarded rule keys.
     events: deque[tuple[str, float]] = field(
         default_factory=lambda: deque(maxlen=_EVENT_HISTORY_CAP)
@@ -557,6 +590,30 @@ class BehaviorScorer:
         sf = max(1, int(self._e("smooth_frames")))
         return n >= sf and (n % sf == 0)
 
+    def _contact_gate(self, state: TrackState, key: str, hit: bool, now: float) -> bool:
+        """docs/33 P0-3 — time-based banking gate for sustained-contact detectors
+        (bag/pocket). Per-frame banking let a resting hand at the hip saturate
+        risk to 100 in ~2 s (the PoseLift AUC-0.39 root cause). Instead:
+        bank only after `min_hold_sec` of CONTINUOUS contact, then at most once
+        per `interval_sec`, at most `max_banks_per_contact` times per stint.
+        Wall-clock based → frame-rate independent (same philosophy as the edge
+        agent's v0.7.53 timing gates)."""
+        if not hit:
+            state.contact_since.pop(key, None)
+            state.contact_banks.pop(key, None)
+            return False
+        since = state.contact_since.setdefault(key, now)
+        if now - since < self._dp(key, "min_hold_sec", 0.4) - 1e-9:  # eps: float sums
+            return False
+        if state.contact_banks.get(key, 0) >= int(self._dp(key, "max_banks_per_contact", 3.0)):
+            return False
+        last = state.contact_last_bank.get(key)
+        if last is not None and now - last < self._dp(key, "interval_sec", 2.0):
+            return False
+        state.contact_banks[key] = state.contact_banks.get(key, 0) + 1
+        state.contact_last_bank[key] = now
+        return True
+
     def _analyze(
         self,
         state: TrackState,
@@ -714,16 +771,21 @@ class BehaviorScorer:
         # backpack), and the VLM verifies the clip, so a stray reach-into-bag is
         # filtered downstream. Set the per-detector `require_holding` param to 1 to
         # restore the strict "must have picked up a COCO item first" gate.
+        bag_hit = False
         if items and (state.holding or self._dp("bag_interaction", "require_holding", 0.0) < 0.5):
             bags = [it for it in items if it.label in ("handbag", "backpack", "suitcase")]
-            if bags and self._wrist_in_any(l_wrist, r_wrist, [b.box for b in bags]):
-                _add("bag_interaction", self.weights.get("bag_interaction", 0.0), "Гар уут руу")
+            bag_hit = bool(bags) and self._wrist_in_any(l_wrist, r_wrist, [b.box for b in bags])
+        # Time-gated banking (docs/33 P0-3): the gate must see contact-vs-no-contact
+        # EVERY frame (to track stints), so it runs outside the geometry branch.
+        if self._contact_gate(state, "bag_interaction", bag_hit, now):
+            _add("bag_interaction", self.weights.get("bag_interaction", 0.0), "Гар уут руу")
 
         # 7. Pocket interaction — wrist near a hip. Like bag (above), fires on
         # geometry alone by default (require_holding=0) so it catches pocketing a
         # non-COCO retail item; set `require_holding`=1 to gate on a prior pickup.
         # Real hip keypoints win; when off-frame (upper-body cameras) fall back to
         # an estimated hip point below each shoulder at the waist line (hip_cy).
+        pocket_hit = False
         if hip_cy is not None and (
             state.holding or self._dp("pocket_interaction", "require_holding", 0.0) < 0.5
         ):
@@ -738,18 +800,19 @@ class BehaviorScorer:
                     (float(l_shoulder[0]), hip_cy),
                     (float(r_shoulder[0]), hip_cy),
                 ]
-            for hx, hy in hip_points:
-                hit = any(
-                    _kp_valid(w) and math.dist((float(w[0]), float(w[1])), (hx, hy)) < radius
-                    for w in (l_wrist, r_wrist)
-                )
-                if hit:
-                    _add(
-                        "pocket_interaction",
-                        self.weights.get("pocket_interaction", 0.0),
-                        "Халаас руу",
-                    )
-                    break
+            pocket_hit = any(
+                _kp_valid(w) and math.dist((float(w[0]), float(w[1])), (hx, hy)) < radius
+                for hx, hy in hip_points
+                for w in (l_wrist, r_wrist)
+            )
+        # Time-gated banking (docs/33 P0-3) — see _contact_gate. Runs every frame
+        # so stint tracking sees contact breaks.
+        if self._contact_gate(state, "pocket_interaction", pocket_hit, now):
+            _add(
+                "pocket_interaction",
+                self.weights.get("pocket_interaction", 0.0),
+                "Халаас руу",
+            )
 
         # 8. Rapid movement — wrist velocity spike; only when holding.
         rapid = False
@@ -941,6 +1004,12 @@ class BehaviorScorer:
             state.events.clear()
             state.awarded.clear()
             state.concealment_frames = 0
+            # NB: contact_since/banks/last_bank (the bag/pocket time gate) are NOT
+            # reset here — this reset runs on every calm frame (score 0, nothing
+            # fired), which is exactly when a contact stint is still building up
+            # its min_hold_sec; clearing would restart the stint timer each frame
+            # and the gate could never open. Stints reset when contact BREAKS
+            # (inside _contact_gate) and on stale-track cleanup.
             state.episode_started_at = None
             state.episode_behaviors.clear()
             state.episode_behavior_ts.clear()

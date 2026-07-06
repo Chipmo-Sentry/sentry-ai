@@ -133,6 +133,14 @@ class Settings(BaseSettings):
     # worker (a scan in flight skips the next ticks), so this is a target, not a
     # guarantee — effective rate ≈ VLM latency when busy.
     live_scan_interval_sec: float = 3.0
+    # docs/33 P0-4 — scan cost controls. The periodic scan used to submit the
+    # most-suspicious PRESENT person unconditionally (even at risk 0%), so GPU
+    # spend scaled with foot traffic, not suspicion. Now a candidate must be at
+    # or above live_alert_threshold_pct (the per-camera risk_threshold override
+    # applies — that knob was previously dead), and the SAME person is not
+    # re-scanned within this cooldown (a fresh higher-risk person still scans
+    # on the next tick).
+    live_scan_person_cooldown_sec: float = 20.0
     live_breach_sustain_sec: float = 1.0
     live_breach_cooldown_sec: float = 30.0
     # Wait this long after the breach before cutting, so the clip catches the act

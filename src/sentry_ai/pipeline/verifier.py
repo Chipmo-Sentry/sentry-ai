@@ -3,11 +3,16 @@
 import time
 from pathlib import Path
 
+import httpx
+
+from sentry_ai.logging_setup import get_logger
 from sentry_ai.pipeline.frames import extract_keyframes
 from sentry_ai.pipeline.prompt import render_prompt
 from sentry_ai.providers.base import VLMProvider
 from sentry_ai.schemas.vlm_output import Category, VLMOutput, VLMParseError
 from sentry_ai.settings import get_settings
+
+log = get_logger("sentry_ai.pipeline.verifier")
 
 
 async def verify_clip(
@@ -39,11 +44,17 @@ async def verify_clip(
 
     last_err: VLMParseError | None = None
     started = time.perf_counter()
-    for _attempt in range(settings.retry_on_parse_error + 1):
+    # docs/33 P0-5: a COLD VLM (model paged out / first call after idle) routinely
+    # exceeds the steady-state timeout, and the resulting httpx timeout used to
+    # propagate as a silent scan failure until the model warmed. Retry a transport
+    # error ONCE with an extended timeout (covers the cold load); a second
+    # transport failure re-raises so the caller can clean up + report the miss.
+    timeout_sec: int = settings.inference_timeout_sec
+    transport_retried = False
+    parse_failures = 0
+    while parse_failures <= settings.retry_on_parse_error:
         try:
-            output = await provider.verify(
-                frames, prompt, timeout_sec=settings.inference_timeout_sec
-            )
+            output = await provider.verify(frames, prompt, timeout_sec=timeout_sec)
             latency_ms = int((time.perf_counter() - started) * 1000)
             # Record the GPU run so the dashboard shows the VLM's activity history.
             runtime_config.record_vlm_verify(latency_ms)
@@ -57,6 +68,18 @@ async def verify_clip(
             return output, latency_ms, len(frames)
         except VLMParseError as e:
             last_err = e
+            parse_failures += 1  # transport retry deliberately doesn't consume these
+            continue
+        except httpx.HTTPError as e:
+            if transport_retried:
+                raise  # second transport failure — genuinely down, caller handles
+            transport_retried = True
+            timeout_sec = max(timeout_sec * 2, 90)  # cold-load headroom
+            log.warning(
+                "verify.vlm_transport_retry",
+                error=str(e)[:160],
+                retry_timeout_sec=timeout_sec,
+            )
             continue
 
     # All retries exhausted — fall back to a neutral verdict so the pipeline
