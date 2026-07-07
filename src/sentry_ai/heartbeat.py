@@ -30,7 +30,10 @@ from sentry_ai.settings import get_settings
 log = get_logger("sentry_ai.heartbeat")
 
 # Local app URL — the heartbeat process reads live-worker stats from here.
-_LOCAL_APP = "http://127.0.0.1:8001"
+# docs/33 P2-32: derive from settings.port — the old hardcoded :8001 silently
+# reported "0 cameras / no FPS" to the dashboard whenever the app ran on a
+# non-default port (e.g. a vast node where only other ports are mapped).
+_LOCAL_APP = f"http://127.0.0.1:{get_settings().port}"
 
 # Latest config pushed from the backend (read by the manager when starting
 # workers). None until the first successful heartbeat.
