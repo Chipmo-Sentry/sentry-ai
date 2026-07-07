@@ -149,12 +149,14 @@ _POSE_HISTORY_TTL_SEC = 60.0
 
 
 def _risk_bgr(color: str) -> tuple[int, int, int]:
-    """Risk band → BGR (cv2). Matches the existing box colours."""
+    """Risk band → BGR (cv2). ONE colour language across the product (ui-kit
+    src/lib/risk.ts RISK_COLORS): low=green #22C55E, medium=royal-blue #2563EB,
+    high=red #EF4444 — matches the frontend/agent overlays exactly."""
     if color == "red":
-        return (0, 0, 255)
-    if color == "yellow":
-        return (0, 230, 230)
-    return (0, 255, 0)
+        return (68, 68, 239)  # #EF4444
+    if color == "yellow":  # historical wire key for the MEDIUM band
+        return (235, 99, 37)  # #2563EB royal-blue
+    return (94, 197, 34)  # #22C55E
 
 
 def _kp_point(kp: NDArray[np.float32] | None, idx: int) -> tuple[int, int] | None:
