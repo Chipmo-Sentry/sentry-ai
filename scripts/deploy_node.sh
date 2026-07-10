@@ -15,8 +15,10 @@ git checkout main
 git pull --ff-only origin main
 echo "== after:  $(git log --oneline -1)"
 
-# No new Python deps in this release, but sync is cheap + idempotent.
-uv sync --frozen 2>/dev/null || uv sync
+# --inexact: add/upgrade lockfile deps WITHOUT removing extraneous packages —
+# the node venv carries hand-installed GPU extras (cu128 torch + nvidia-* libs)
+# that a plain `uv sync` strips, breaking `import torch` (learned 2026-07-10).
+uv sync --inexact --frozen 2>/dev/null || uv sync --inexact
 
 supervisorctl restart sentry-ai
 sleep 25
