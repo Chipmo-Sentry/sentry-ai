@@ -52,6 +52,12 @@ class TrackPayload(BaseModel):
     # accumulated across the store's cameras. None when re-ID is disabled.
     store_person_id: int | None = Field(default=None)
     store_risk_pct: float | None = Field(default=None)
+    # docs/30 F5 — visitor demographics from the node's CPU classifier
+    # (live_worker/demographics.py). None until the per-track vote is stable:
+    # the backend counts each (camera, person_id) once, FIRST values win, so a
+    # premature label would permanently mis-bucket the visitor.
+    gender: Literal["male", "female", "unknown"] | None = Field(default=None)
+    age_band: Literal["child", "youth", "adult", "senior", "unknown"] | None = Field(default=None)
 
 
 class ItemPayload(BaseModel):

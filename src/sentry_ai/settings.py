@@ -168,6 +168,26 @@ class Settings(BaseSettings):
     # if unavailable). See live_worker/reid.py::make_embedder.
     reid_model: str = "histogram"
 
+    # --- Visitor demographics (docs/30 F5, /insights «Хүйс, насны бүтэц») ---
+    # CPU-only gender/age classifier on tracked people: YuNet face detection
+    # (MIT, opencv_zoo) + age/gender GoogleNets (Apache-2.0, onnx/models) via
+    # cv2.dnn — deliberately NOT InsightFace buffalo_l (weights are
+    # non-commercial-only; docs/24's license review applies). Zero GPU use.
+    # Models download once, SHA-256 pinned, into demographics_model_dir.
+    demographics_enabled: bool = True
+    demographics_model_dir: str = "models"
+    # Per-track attempt cadence in ANALYZED frames (~2 s at 5 FPS inference)
+    # plus a per-frame attempt cap so a crowded frame can't stall the loop.
+    demographics_every_n: int = 10
+    demographics_max_per_frame: int = 2
+    # A track's labels emit only after min_votes agreeing samples (the backend
+    # counts first-wins per person) and LOCK at max_votes — demographics are an
+    # attribute, not per-frame state, so a locked track is never re-classified.
+    demographics_min_votes: int = 2
+    demographics_max_votes: int = 5
+    # Faces smaller than this (source pixels) are too far to classify reliably.
+    demographics_min_face_px: int = 24
+
     # --- Service auth + input hardening (enforce-if-configured) ---
     # Shared secret required as `Authorization: Bearer <token>` on /v1/* routes.
     # None/empty → routes are OPEN (trusted-LAN M1 default). Set the SAME value
