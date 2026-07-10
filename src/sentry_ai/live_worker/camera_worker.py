@@ -21,6 +21,12 @@ from numpy.typing import NDArray
 
 from sentry_ai.live_worker import breach_pusher
 from sentry_ai.live_worker.behavior import BehaviorScorer, ScoreResult
+from sentry_ai.live_worker.demographics import (
+    AgeBand,
+    Gender,
+    TrackDemographics,
+    make_track_demographics,
+)
 from sentry_ai.live_worker.emitter import MetadataEmitter
 from sentry_ai.live_worker.reid import Embedder, StorePersonRegistry
 from sentry_ai.live_worker.schemas import FrameMetadata, ItemPayload, TrackPayload
@@ -303,6 +309,9 @@ class CameraWorker:
         self._item_runner: YoloItemRunner | None = None
         self._tracker: ByteTrackWrapper | None = None
         self._scorer: BehaviorScorer | None = None
+        # docs/30 F5 — per-track visitor gender/age votes (CPU). None = disabled
+        # or models unavailable; the worker runs identically without it.
+        self._demographics: TrackDemographics | None = None
         self._last_cleanup_frame = 0
 
         # Item detection runs less frequently than pose (items don't move
@@ -463,6 +472,9 @@ class CameraWorker:
             # ByteTrack frame_rate hint = effective post-skip FPS target
             self._tracker = ByteTrackWrapper(frame_rate=max(1, 30 // self.frame_skip))
             self._scorer = BehaviorScorer()
+            # Returns None when disabled/unavailable (never raises) — the first
+            # node start downloads ~48 MB of pinned ONNX into the model dir.
+            self._demographics = make_track_demographics()
             # Apply any config the poller delivered while we were initializing.
             if self._pending_weights is not None:
                 self._scorer.update_weights(self._pending_weights)
@@ -585,6 +597,16 @@ class CameraWorker:
         self._persons_this_frame = len(detections)
         self._capture_pose(tracked)  # Фаз 0: roll the per-track skeleton history
 
+        # docs/30 F5 — visitor demographics (CPU-only; cadence + vote-lock
+        # bounded inside). Labels stay None until a track's vote is stable; a
+        # classifier failure must never stall the frame loop.
+        demo: dict[int, tuple[Gender | None, AgeBand | None]] = {}
+        if self._demographics is not None:
+            try:
+                demo = self._demographics.observe(frame_bgr, tracked, self._frames_processed)
+            except Exception:  # noqa: BLE001
+                log.exception("camera.demographics_failed", camera_id=self.camera_id)
+
         # Throttled YOLO-filter heartbeat. captured vs processed ≈ frame_skip
         # confirms the skip gate; persons>0 when someone is in view confirms the
         # detector + conf threshold are live. Grep `camera.yolo_stats` in logs.
@@ -676,6 +698,8 @@ class CameraWorker:
                     ),
                     store_person_id=store_person_id,
                     store_risk_pct=store_risk_pct,
+                    gender=demo.get(t.tracker_id, (None, None))[0],
+                    age_band=demo.get(t.tracker_id, (None, None))[1],
                 ),
             )
 
@@ -699,6 +723,8 @@ class CameraWorker:
             stale_scans = [tid for tid, ts in self._scan_last_by_tid.items() if now - ts > 300.0]
             for tid in stale_scans:
                 del self._scan_last_by_tid[tid]
+            if self._demographics is not None:
+                self._demographics.prune()
 
         # VLM-primary periodic scan (docs/33 P0-4): every scan_interval, hand the
         # most-suspicious ELIGIBLE person to the VLM — at/above the scan floor
