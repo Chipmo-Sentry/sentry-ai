@@ -69,7 +69,7 @@ backend POST /v1/verify {clip_path, store_id?, provider?, rag_query?}
   → optional RAG: fetch similar past staff-verified cases → inject as Mongolian context
   → Jinja prompt (prompts/verify_v1.j2) + frames → Ollama VLM
   → strict Pydantic parse of the JSON verdict (2× retry → graceful fallback)
-  → VerifyResponse {category, confidence, reasoning, model_name, latency_ms, embedding?}
+  → VerifyResponse {category, confidence, reasoning, model_name, inference_latency_ms, frames_used, embedding?}
 ```
 
 **Live breach (cut-verify):** `POST /v1/cut-verify` cuts the relevant MediaMTX fmp4 segments
@@ -88,7 +88,8 @@ emit metadata. A background `MetadataEmitter` batches frames to the backend's `/
 |---|---|
 | `POST /v1/verify` | verify an mp4 clip (path-based) |
 | `POST /v1/cut-verify` | cut MediaMTX segments around a live breach + verify |
-| `POST /v1/live/start` · `/stop/{cam}` · `GET /status` · `/emitter` · `/snapshot/{cam}` | live worker control + debug |
+| `POST /v1/edge-clip-upload` | verify an uploaded clip's bytes (multipart) from an edge agent |
+| `POST /v1/live/start` · `/stop/{cam}` · `GET /status` · `/emitter` · `/provider` · `/snapshot/{cam}` | live worker control + debug |
 | `GET /v1/models` | list available provider names |
 | `GET /healthz` | status, version, Ollama reachability, loaded models |
 
@@ -99,7 +100,7 @@ All `/v1/*` routes require a Bearer service token when `AI_SERVICE_TOKEN` is set
 ## Prerequisites
 
 - Python 3.11, [`uv`](https://docs.astral.sh/uv/), and **ffmpeg** on `PATH`.
-- An [Ollama](https://ollama.com) install with a VLM pulled: `ollama pull minicpm-v:8b`.
+- An [Ollama](https://ollama.com) install with the default VLM pulled: `ollama pull qwen3-vl:4b-instruct` (alt/rollback: `ollama pull minicpm-v:8b`).
 - For GPU inference: an NVIDIA GPU with a CUDA-enabled torch (the installer pulls the `cu128` wheels).
 
 ## Quick start
@@ -132,9 +133,9 @@ src/sentry_ai/
 ├── api/v1/               — health, verify, live
 ├── schemas/              — VerifyRequest/Response, VLMOutput (strict), CutVerify*
 ├── pipeline/             — frames (ffmpeg keyframes), prompt (Jinja), verifier (orchestrator)
-├── providers/            — base Protocol, ollama_client, minicpm_v, qwen_vl, factory
+├── providers/            — base Protocol, ollama_client, minicpm_v, qwen3_vl, qwen_vl, vllm_qwen3, factory
 └── live_worker/          — manager, camera_worker, yolo_runner, yolo_det, tracker (ByteTrack),
-                            behavior (engine v2), reid, emitter, config_poller
+                            behavior (engine v2), reid, emitter, config_poller, breach_pusher, zones
 prompts/                  — verify_v1.j2 (Mongolian task) + categories.md (label semantics)
 installer/                — Inno Setup wizard → ChipmoSentryAi-Setup.exe
 ```
@@ -173,9 +174,9 @@ uv run mypy src/sentry_ai           # strict
 The wizard collects backend URL / pairing code / Ollama URL / tunnel name, runs `uv sync` at install time
 (downloads the CUDA torch wheels), and registers three Windows services via NSSM:
 
-- **ChipmoSentryIngest** — MediaMTX (RTSP ingest)
-- **ChipmoSentryAi** — this FastAPI service
-- **ChipmoSentryTunnel** — cloudflared (out-bound to Railway)
+- **ChipmoSentryAi-ingest** — MediaMTX (RTSP ingest)
+- **ChipmoSentryAi-ai** — this FastAPI service
+- **ChipmoSentryAi-tunnel** — cloudflared (out-bound to Railway)
 
 Ollama is **not** bundled — the operator brings their own install, and the service points at it via
 `OLLAMA_BASE_URL`. Full walkthrough: [docs/17-AI-SERVER-SETUP.md](../docs/17-AI-SERVER-SETUP.md).
