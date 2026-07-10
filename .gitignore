@@ -39,3 +39,6 @@ installer/bin/
 
 # Ad-hoc hot-patch staging copied to the GPU node — scratch, never commit
 _node_patch/
+
+# Demographics ONNX models (downloaded at runtime, SHA-256 pinned)
+models/
