@@ -885,7 +885,7 @@ class BehaviorScorer:
         # the IDLE reset, so the criterion can't re-bank every idle frame after a
         # reset (which would pump a benign repeat-browser's score up to the alert
         # band). A camera with no shelf zone never sets in_zones → no-op.
-        now_in_shelf = "shelf" in in_zones
+        now_in_shelf = bool({"shelf", "fridge", "mannequin"} & in_zones)
         if now_in_shelf and not state.in_shelf:
             state.shelf_visits += 1
             visits_threshold = max(
