@@ -188,6 +188,30 @@ class Settings(BaseSettings):
     # Faces smaller than this (source pixels) are too far to classify reliably.
     demographics_min_face_px: int = 24
 
+    # --- Staff identification via neck-badge color (live_worker/staff.py) ---
+    # Master switch. The feature additionally requires a badge color configured
+    # centrally (ai-nodes config `staff_badge_color`) — without one it does
+    # nothing, so enabled=True costs zero until the owner picks a color.
+    staff_enabled: bool = True
+    # Per-track HSV check cadence in analyzed frames + per-frame attempt cap
+    # (the check is a tiny chest-crop mask count — microseconds, CPU).
+    staff_every_n: int = 8
+    staff_max_per_frame: int = 3
+    # Chest pixels matching the badge color must cover at least this fraction
+    # of the chest crop for a frame to count as one color "hit".
+    staff_frac_threshold: float = 0.08
+    # hits >= min_hits → candidate: ask the VLM once ("badge worn? yes/no").
+    # When the VLM is unavailable (edge box / provider down), color evidence
+    # alone locks at color_only_hits — the node must not depend on the cloud.
+    staff_min_hits: int = 3
+    staff_color_only_hits: int = 8
+    # Stop checking a track after this many attempts without locking (a visitor
+    # never grows a badge mid-visit; re-entry gets a fresh track anyway).
+    staff_max_attempts: int = 60
+    # Ask the VLM to confirm a color-candidate (kills lookalike false positives:
+    # scarves, shopping bags, printed shirts). Falls back to color-only lock.
+    staff_vlm_verify: bool = True
+
     # --- Service auth + input hardening (enforce-if-configured) ---
     # Shared secret required as `Authorization: Bearer <token>` on /v1/* routes.
     # None/empty → routes are OPEN (trusted-LAN M1 default). Set the SAME value

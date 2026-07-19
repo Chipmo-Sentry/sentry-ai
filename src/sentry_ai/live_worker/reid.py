@@ -240,6 +240,11 @@ class StorePerson:
     last_seen: float = field(default_factory=time.time)
     last_camera: str = ""  # most-recent camera (drives spatial-temporal gating)
     cameras: set[str] = field(default_factory=set)
+    # Staff identification (live_worker/staff.py): once a badge match locks on ANY
+    # camera, the store-global person stays staff — turning their back or walking
+    # to another camera doesn't reset it. Cleared naturally when the person is
+    # pruned after window_sec of absence (badge re-detects on return).
+    is_staff: bool = False
 
 
 class StorePersonRegistry:
@@ -368,6 +373,18 @@ class StorePersonRegistry:
             p.score_ts = ts
             p.last_seen = ts
             return p.score
+
+    def mark_staff(self, person_id: int) -> None:
+        """Latch the store-global person as staff (badge vote locked on a camera)."""
+        with self._lock:
+            p = self._people.get(person_id)
+            if p is not None:
+                p.is_staff = True
+
+    def is_staff(self, person_id: int) -> bool:
+        with self._lock:
+            p = self._people.get(person_id)
+            return p.is_staff if p is not None else False
 
     def get_score(self, person_id: int) -> float:
         with self._lock:

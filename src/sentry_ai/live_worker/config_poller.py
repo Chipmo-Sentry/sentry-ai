@@ -143,6 +143,7 @@ class BehaviorConfigPoller:
             set_central_detection,
             set_central_provider,
             set_provider_health,
+            set_staff_badge_color,
         )
 
         if not settings.ai_node_id:
@@ -169,6 +170,10 @@ class BehaviorConfigPoller:
         # restart: camera workers read these live (frame_skip / conf / cadence /
         # scan interval) and the verify path reads frames_per_clip / frame_max_dim
         # per breach. Bad values are dropped inside set_central_detection.
+        # Staff badge color (central control). None/empty clears → staff
+        # identification off. Hot-applied: staff.py reads it per frame.
+        if set_staff_badge_color(cfg.get("staff_badge_color")):
+            log.info("config_poller.staff_badge_color", color=cfg.get("staff_badge_color"))
         if set_central_detection(cfg) and isinstance(cfg, dict):
             log.info(
                 "config_poller.detection_applied",

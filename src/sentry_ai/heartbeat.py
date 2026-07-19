@@ -268,6 +268,19 @@ def _telemetry(client: httpx.Client) -> dict[str, object]:
             hls_base = f"http://{_ip}:{_port}"
     if hls_base:
         payload["mediamtx_hls_base"] = hls_base.rstrip("/")
+    # Externally-reachable MediaMTX WHEP base (WebRTC-HTTP egress, port 8889) so
+    # the frontend can play sub-second-latency WebRTC instead of HLS. Same
+    # derivation rules as the HLS base: explicit MEDIAMTX_PUBLIC_WHEP_BASE wins
+    # (e.g. the cloudflared whep.sentry.chipmo.mn hostname), else the vast.ai
+    # env self-heals across restarts/port remaps.
+    whep_base = os.environ.get("MEDIAMTX_PUBLIC_WHEP_BASE")
+    if not whep_base:
+        _ip = os.environ.get("PUBLIC_IPADDR")
+        _wport = os.environ.get("VAST_TCP_PORT_8889")
+        if _ip and _wport:
+            whep_base = f"http://{_ip}:{_wport}"
+    if whep_base:
+        payload["mediamtx_whep_base"] = whep_base.rstrip("/")
     # MediaMTX paths this node is currently serving (ready streams), so the backend
     # keeps the node↔camera link + HLS proxy working even when NO analysis worker
     # runs — edge-first: the agent does YOLO/behaviour, the node only relays the

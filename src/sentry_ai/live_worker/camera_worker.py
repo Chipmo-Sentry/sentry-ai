@@ -27,6 +27,7 @@ from sentry_ai.live_worker.demographics import (
     TrackDemographics,
     make_track_demographics,
 )
+from sentry_ai.live_worker.staff import TrackStaff, make_track_staff
 from sentry_ai.live_worker.emitter import MetadataEmitter
 from sentry_ai.live_worker.reid import Embedder, StorePersonRegistry
 from sentry_ai.live_worker.schemas import FrameMetadata, ItemPayload, TrackPayload
@@ -312,6 +313,9 @@ class CameraWorker:
         # docs/30 F5 — per-track visitor gender/age votes (CPU). None = disabled
         # or models unavailable; the worker runs identically without it.
         self._demographics: TrackDemographics | None = None
+        # Staff badge-color votes (staff.py). Inert until the central
+        # staff_badge_color config is set; None = feature disabled by settings.
+        self._staff: TrackStaff | None = None
         self._last_cleanup_frame = 0
 
         # Item detection runs less frequently than pose (items don't move
@@ -475,6 +479,7 @@ class CameraWorker:
             # Returns None when disabled/unavailable (never raises) — the first
             # node start downloads ~48 MB of pinned ONNX into the model dir.
             self._demographics = make_track_demographics()
+            self._staff = make_track_staff()
             # Apply any config the poller delivered while we were initializing.
             if self._pending_weights is not None:
                 self._scorer.update_weights(self._pending_weights)
@@ -607,6 +612,15 @@ class CameraWorker:
             except Exception:  # noqa: BLE001
                 log.exception("camera.demographics_failed", camera_id=self.camera_id)
 
+        # Staff badge-color vote (staff.py) — same contract as demographics: a
+        # failure must never stall the frame loop; False until a track locks.
+        staff_map: dict[int, bool] = {}
+        if self._staff is not None:
+            try:
+                staff_map = self._staff.observe(frame_bgr, tracked, self._frames_processed)
+            except Exception:  # noqa: BLE001
+                log.exception("camera.staff_failed", camera_id=self.camera_id)
+
         # Throttled YOLO-filter heartbeat. captured vs processed ≈ frame_skip
         # confirms the skip gate; persons>0 when someone is in view confirms the
         # detector + conf threshold are live. Grep `camera.yolo_stats` in logs.
@@ -660,6 +674,7 @@ class CameraWorker:
             # to their store-wide total, so suspicion built across cameras carries.
             store_person_id: int | None = None
             store_risk_pct: float | None = None
+            is_staff = staff_map.get(t.tracker_id, False)
             if (
                 self._registry is not None
                 and self._embedder is not None
@@ -676,6 +691,12 @@ class CameraWorker:
                     # so risk built up during low-quality/skipped frames isn't lost — it
                     # carries to the next frame clear enough to re-identify the person.
                     self._prev_raw[t.tracker_id] = result.raw_score
+                    # Staff latch rides the store-global person: a badge locked on
+                    # any camera keeps this person staff here, back turned or not.
+                    if is_staff:
+                        self._registry.mark_staff(store_person_id)
+                    elif self._registry.is_staff(store_person_id):
+                        is_staff = True
 
             tracks_payload.append(
                 TrackPayload(
@@ -700,6 +721,7 @@ class CameraWorker:
                     store_risk_pct=store_risk_pct,
                     gender=demo.get(t.tracker_id, (None, None))[0],
                     age_band=demo.get(t.tracker_id, (None, None))[1],
+                    is_staff=is_staff,
                 ),
             )
 
@@ -725,6 +747,8 @@ class CameraWorker:
                 del self._scan_last_by_tid[tid]
             if self._demographics is not None:
                 self._demographics.prune()
+            if self._staff is not None:
+                self._staff.prune()
 
         # VLM-primary periodic scan (docs/33 P0-4): every scan_interval, hand the
         # most-suspicious ELIGIBLE person to the VLM — at/above the scan floor

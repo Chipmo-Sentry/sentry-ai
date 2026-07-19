@@ -116,6 +116,28 @@ def resolve_frame_max_dim(default: int) -> int:
     return default
 
 
+# Staff badge color (central control, per-node). None → staff identification
+# fully off (zero per-frame cost). Set from /api/v1/ai-nodes/config by the
+# poller; read by live_worker/staff.py each frame so a color change (or clearing
+# it) hot-applies without a restart.
+_staff_badge_color: str | None = None
+
+
+def set_staff_badge_color(color: str | None) -> bool:
+    """Returns True when the value changed (caller logs it once)."""
+    global _staff_badge_color
+    val = color.strip().lower() if isinstance(color, str) and color.strip() else None
+    with _lock:
+        changed = val != _staff_badge_color
+        _staff_badge_color = val
+    return changed
+
+
+def get_staff_badge_color() -> str | None:
+    with _lock:
+        return _staff_badge_color
+
+
 def set_central_provider(name: str | None) -> None:
     """Called by the config poller after each successful node-config fetch."""
     global _central_provider

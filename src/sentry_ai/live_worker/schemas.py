@@ -58,6 +58,12 @@ class TrackPayload(BaseModel):
     # premature label would permanently mis-bucket the visitor.
     gender: Literal["male", "female", "unknown"] | None = Field(default=None)
     age_band: Literal["child", "youth", "adult", "senior", "unknown"] | None = Field(default=None)
+    # Staff identification via neck-badge color (live_worker/staff.py). True only
+    # after the per-track vote locked (color evidence, VLM-confirmed when
+    # available). Riding every frame so the overlay can recolor the box AND the
+    # backend aggregator can exclude staff from visitor KPIs/paths/heatmap.
+    # Alerts are NOT suppressed for staff (internal theft stays monitored).
+    is_staff: bool = Field(default=False)
 
 
 class ItemPayload(BaseModel):
