@@ -44,3 +44,8 @@ pathDefaults:
   recordFormat: fmp4
   recordSegmentDuration: 1h
   recordDeleteAfter: 24h
+
+# MediaMTX v1.10+ rejects unknown paths without an explicit catch-all —
+# without this every agent publish dies with 'path is not configured'.
+paths:
+  all_others:
