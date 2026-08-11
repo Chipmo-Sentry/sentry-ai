@@ -27,8 +27,8 @@ rtspTransports: [tcp]
 hls: yes
 hlsAddress: :8888
 hlsAlwaysRemux: yes
-hlsVariant: lowLatency
-hlsSegmentCount: 7
+hlsVariant: fmp4
+hlsSegmentCount: 5
 hlsSegmentDuration: 1s
 hlsPartDuration: 200ms
 
