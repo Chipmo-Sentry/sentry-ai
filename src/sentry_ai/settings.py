@@ -226,6 +226,9 @@ class Settings(BaseSettings):
     # Schemes /v1/live/start may open with cv2.VideoCapture — blocks file://,
     # http(s):// and other SSRF/local-file vectors. rtsp(s) only by default.
     allowed_rtsp_schemes: str = "rtsp,rtsps"
+    # Where the manager persists live-worker specs so a node restart replays
+    # them (live_worker/state_store.py). Relative to the service's working dir.
+    worker_state_path: str = "worker_state.json"
 
     # --- Edge clip-upload hardening (ADR-0029 §12, slice S0) ---
     # Cap a single uploaded clip. Bytes are streamed to disk and the request is

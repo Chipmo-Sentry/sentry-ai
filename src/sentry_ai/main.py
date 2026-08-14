@@ -70,6 +70,22 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                     store_id=settings.live_auto_start_store_id,
                 )
 
+    # Replay workers persisted by the manager (live_worker/state_store.py) so a
+    # node restart brings the AI pipeline back WITHOUT waiting for a backend
+    # re-provision. Same Railway red-line as auto-start above. start_camera is
+    # idempotent for an already-running identical spec, so overlapping with
+    # LIVE_AUTO_START is harmless.
+    if not is_railway_host():
+        from sentry_ai.live_worker.state_store import load_specs
+
+        manager = get_manager()
+        for spec in load_specs():
+            log.info("live.restore_worker", camera_id=spec.get("camera_id"))
+            try:
+                manager.start_camera(**spec)
+            except Exception:  # noqa: BLE001 — one bad spec must not block the rest
+                log.exception("live.restore_worker_failed", camera_id=spec.get("camera_id"))
+
     # AI-node heartbeat — own daemon thread (resilient to event-loop starvation
     # from the GPU worker threads; an asyncio task here stops beating under load).
     from sentry_ai.heartbeat import start_heartbeat, stop_heartbeat

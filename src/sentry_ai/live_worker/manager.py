@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable
 from functools import lru_cache
 
+from sentry_ai.live_worker import state_store
 from sentry_ai.live_worker.camera_worker import CameraWorker
 from sentry_ai.live_worker.config_poller import get_config_poller
 from sentry_ai.live_worker.emitter import MetadataEmitter
@@ -95,6 +96,20 @@ class LiveWorkerManager:
                 on_params=worker.apply_params,
             )
 
+            # Persist the spec so a node restart replays this worker (main.py
+            # startup) — without this, a reboot leaves AI dark until the next
+            # backend provision (bit us 2026-08-11).
+            state_store.record_started(
+                camera_id,
+                {
+                    "rtsp_url": rtsp_url,
+                    "frame_skip": frame_skip,
+                    "store_id": store_id,
+                    "alert_threshold_pct": alert_threshold_pct,
+                    "zones": zones,
+                },
+            )
+
     def stop_camera(self, camera_id: str) -> bool:
         with self._lock:
             # Pop (not just stop) so an intentionally stopped camera disappears
@@ -102,6 +117,9 @@ class LiveWorkerManager:
             # — which would false-alarm the per-camera health watchdog (T12 #3).
             worker = self._workers.pop(camera_id, None)
             self._unsubs.pop(camera_id, lambda: None)()
+            # Deliberate deprovision — forget it even if no live worker matched,
+            # so a stale saved spec can't resurrect a removed camera on reboot.
+            state_store.record_stopped(camera_id)
             if worker is None:
                 return False
             worker.stop()
