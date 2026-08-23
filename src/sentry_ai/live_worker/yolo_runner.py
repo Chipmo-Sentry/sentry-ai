@@ -68,7 +68,11 @@ def _load_model(weights: str = "yolo26s-pose.pt") -> tuple[object, str]:
         log.info("yolo.loading", weights=weights, device=device)
         model = YOLO(weights)
         # Warm up — first inference is significantly slower
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        from sentry_ai.settings import get_settings
+
+        # Warm at the CONFIGURED imgsz so the first real frame is fast too.
+        sz = get_settings().yolo_imgsz
+        dummy = np.zeros((sz, sz, 3), dtype=np.uint8)
         model.predict(dummy, device=device, verbose=False, classes=[PERSON_CLASS])
         log.info("yolo.loaded", device=device)
         _MODEL = model
@@ -86,7 +90,12 @@ class YoloPoseRunner:
         # Weights configurable (#3) — default yolo26s-pose (ADR-0026).
         from sentry_ai.settings import get_settings
 
-        _load_model(get_settings().yolo_pose_weights)
+        s = get_settings()
+        # Inference tuning: larger imgsz recovers far-away/small persons in wide
+        # store scenes; FP16 halves GPU latency (CUDA only — CPU ignores it).
+        self.imgsz = s.yolo_imgsz
+        self.half = s.yolo_half
+        _load_model(s.yolo_pose_weights)
 
     def detect_persons(self, frame_bgr: NDArray[np.uint8]) -> list[Detection]:
         """Run inference on a single BGR frame, return person detections.
@@ -103,6 +112,8 @@ class YoloPoseRunner:
                 device=device,
                 conf=self.conf,
                 iou=self.iou,
+                imgsz=self.imgsz,
+                half=self.half and device.startswith("cuda"),
                 classes=[PERSON_CLASS],
                 verbose=False,
             )

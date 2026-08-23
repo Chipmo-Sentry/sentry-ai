@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     # or yolo11s-pose.pt/yolo11n.pt to roll back to the pre-ADR-0026 stack.
     yolo_pose_weights: str = "yolo26s-pose.pt"
     yolo_item_weights: str = "yolo26n.pt"
+    # Inference input size (square, px). 640 = ultralytics default. Wide store
+    # scenes put people far from the camera — 960 markedly improves small-person
+    # recall at ~2.2× compute, which a discrete GPU absorbs easily. Applies to
+    # BOTH pose and item runners; restart to change (not hot-applied).
+    yolo_imgsz: int = 640
+    # FP16 inference on CUDA (~2× faster on RTX-class GPUs, negligible accuracy
+    # loss). Ignored on CPU. Set false to A/B against FP32 when debugging.
+    yolo_half: bool = True
 
     # Cross-camera re-ID embedder (#4). "histogram" = dependency-light color
     # histogram (default, weak). "osnet" = learned torchreid OSNet (robust, needs

@@ -65,7 +65,11 @@ def _load_model(weights: str = "yolo26n.pt") -> tuple[object, str]:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         log.info("yolo_det.loading", weights=weights, device=device)
         model = YOLO(weights)
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        from sentry_ai.settings import get_settings
+
+        # Warm at the CONFIGURED imgsz so the first real frame is fast too.
+        sz = get_settings().yolo_imgsz
+        dummy = np.zeros((sz, sz, 3), dtype=np.uint8)
         model.predict(
             dummy,
             device=device,
@@ -86,7 +90,12 @@ class YoloItemRunner:
         self.iou = iou
         from sentry_ai.settings import get_settings
 
-        _load_model(get_settings().yolo_item_weights)
+        s = get_settings()
+        # Same inference tuning as the pose runner (see yolo_runner.__init__) —
+        # items are SMALL objects, so the larger imgsz helps them the most.
+        self.imgsz = s.yolo_imgsz
+        self.half = s.yolo_half
+        _load_model(s.yolo_item_weights)
 
     def detect_items(self, frame_bgr: NDArray[np.uint8]) -> list[Item]:
         model, device = _load_model()
@@ -96,6 +105,8 @@ class YoloItemRunner:
                 device=device,
                 conf=self.conf,
                 iou=self.iou,
+                imgsz=self.imgsz,
+                half=self.half and device.startswith("cuda"),
                 classes=list(COCO_ITEM_CLASSES.keys()),
                 verbose=False,
             )
