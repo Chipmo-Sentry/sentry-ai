@@ -10,6 +10,8 @@ in COCO).
 from __future__ import annotations
 
 import threading
+import time
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,9 +103,22 @@ class YoloPoseRunner:
         """Run inference on a single BGR frame, return person detections.
 
         frame_bgr: (H, W, 3) uint8 array from cv2 (BGR order).
-        """
-        model, device = _load_model()
 
+        With yolo_batch on (default), the call routes through the shared
+        _PoseBatcher: concurrent cameras' frames ride ONE GPU predict instead
+        of queueing on the predict lock — per-call overhead is paid once per
+        batch, so multi-camera throughput scales instead of serializing.
+        """
+        from sentry_ai.settings import get_settings
+
+        if get_settings().yolo_batch:
+            batcher = _PoseBatcher.get()
+            batcher.set_params(
+                conf=self.conf, iou=self.iou, imgsz=self.imgsz, half=self.half
+            )
+            return _parse_pose_result(batcher.infer(frame_bgr))
+
+        model, device = _load_model()
         # ultralytics expects HWC BGR ndarray or path; classes=[0] filters to persons
         # verbose=False suppresses per-frame stdout spam
         with _PREDICT_LOCK:  # predictors aren't thread-safe across camera threads
@@ -117,47 +132,143 @@ class YoloPoseRunner:
                 classes=[PERSON_CLASS],
                 verbose=False,
             )
+        return _parse_pose_result(results[0]) if results else []
 
-        if not results:
-            return []
-        r = results[0]
-        # r.boxes: Boxes object with .xyxy (N, 4) and .conf (N,)
-        boxes = r.boxes
-        if boxes is None or len(boxes) == 0:
-            return []
 
-        # Tensors → CPU numpy
-        xyxy = boxes.xyxy.cpu().numpy()  # (N, 4)
-        conf = boxes.conf.cpu().numpy()  # (N,)
+def _parse_pose_result(r: object) -> list[Detection]:
+    """One ultralytics Results object → person Detections (boxes + keypoints)."""
+    if r is None:
+        return []
+    # r.boxes: Boxes object with .xyxy (N, 4) and .conf (N,)
+    boxes = r.boxes  # type: ignore[attr-defined]
+    if boxes is None or len(boxes) == 0:
+        return []
 
-        # Pose keypoints (only present on pose models). r.keypoints.xy: (N, 17, 2),
-        # r.keypoints.conf: (N, 17). Stack into (N, 17, 3) [x, y, conf] so the
-        # behavior engine can gate low-confidence joints (#1). Fall back to (N,17,2)
-        # if confidence isn't available.
-        kpts_xy: NDArray[np.float32] | None = None
-        if r.keypoints is not None and r.keypoints.xy is not None:
-            xy = r.keypoints.xy.cpu().numpy().astype(np.float32)  # (N, 17, 2)
-            # NB: must NOT reuse the name `conf` here — that is the box-score
-            # array used below for `Detection.score`. Shadowing it broke inference.
-            kp_conf = getattr(r.keypoints, "conf", None)
-            if kp_conf is not None:
-                c = kp_conf.cpu().numpy().astype(np.float32)[..., None]  # (N, 17, 1)
-                kpts_xy = np.concatenate([xy, c], axis=2)  # (N, 17, 3)
-            else:
-                kpts_xy = xy
+    # Tensors → CPU numpy
+    xyxy = boxes.xyxy.cpu().numpy()  # (N, 4)
+    conf = boxes.conf.cpu().numpy()  # (N,)
 
-        out: list[Detection] = []
-        for i in range(xyxy.shape[0]):
-            x1, y1, x2, y2 = xyxy[i].tolist()
-            kp = kpts_xy[i] if kpts_xy is not None and i < kpts_xy.shape[0] else None
-            out.append(
-                Detection(
-                    box=(x1, y1, x2, y2),
-                    score=float(conf[i]),
-                    keypoints=kp,
-                ),
-            )
-        return out
+    # Pose keypoints (only present on pose models). r.keypoints.xy: (N, 17, 2),
+    # r.keypoints.conf: (N, 17). Stack into (N, 17, 3) [x, y, conf] so the
+    # behavior engine can gate low-confidence joints (#1). Fall back to (N,17,2)
+    # if confidence isn't available.
+    kpts_xy: NDArray[np.float32] | None = None
+    keypoints = getattr(r, "keypoints", None)
+    if keypoints is not None and keypoints.xy is not None:
+        xy = keypoints.xy.cpu().numpy().astype(np.float32)  # (N, 17, 2)
+        # NB: must NOT reuse the name `conf` here — that is the box-score
+        # array used below for `Detection.score`. Shadowing it broke inference.
+        kp_conf = getattr(keypoints, "conf", None)
+        if kp_conf is not None:
+            c = kp_conf.cpu().numpy().astype(np.float32)[..., None]  # (N, 17, 1)
+            kpts_xy = np.concatenate([xy, c], axis=2)  # (N, 17, 3)
+        else:
+            kpts_xy = xy
+
+    out: list[Detection] = []
+    for i in range(xyxy.shape[0]):
+        x1, y1, x2, y2 = xyxy[i].tolist()
+        kp = kpts_xy[i] if kpts_xy is not None and i < kpts_xy.shape[0] else None
+        out.append(
+            Detection(
+                box=(x1, y1, x2, y2),
+                score=float(conf[i]),
+                keypoints=kp,
+            ),
+        )
+    return out
+
+
+class _PoseBatcher:
+    """Cross-camera micro-batching for the shared pose model.
+
+    Worker threads submit frames; ONE collector thread drains whatever arrived
+    within `window_ms` (or up to `max_batch`) and runs a single batched
+    predict — ultralytics letterboxes each list item to imgsz, so mixed frame
+    sizes are fine. Results map back positionally. Semantics for the caller are
+    identical to a direct predict (blocking, exceptions propagate); the win is
+    that N cameras stop paying N× per-call overhead while serialized on the
+    predict lock. The collector owns predict exclusively → thread-safe by
+    construction.
+    """
+
+    _instance: _PoseBatcher | None = None
+    _instance_lock = threading.Lock()
+
+    def __init__(self, window_ms: float = 10.0, max_batch: int = 8) -> None:
+        import queue
+
+        self.window_s = window_ms / 1000.0
+        self.max_batch = max(1, max_batch)
+        # Node-global inference params (central config keeps every runner's conf
+        # in lockstep anyway); runners refresh them right before each submit.
+        self.conf = 0.35
+        self.iou = 0.45
+        self.imgsz = 640
+        self.half = True
+        self._q: queue.Queue[tuple[NDArray[np.uint8], Future[object]]] = queue.Queue()
+        self._thread = threading.Thread(target=self._loop, name="yolo-batcher", daemon=True)
+        self._thread.start()
+
+    @classmethod
+    def get(cls) -> _PoseBatcher:
+        with cls._instance_lock:
+            if cls._instance is None:
+                from sentry_ai.settings import get_settings
+
+                s = get_settings()
+                cls._instance = cls(
+                    window_ms=s.yolo_batch_window_ms, max_batch=s.yolo_batch_max
+                )
+            return cls._instance
+
+    def set_params(self, *, conf: float, iou: float, imgsz: int, half: bool) -> None:
+        self.conf = conf
+        self.iou = iou
+        self.imgsz = imgsz
+        self.half = half
+
+    def infer(self, frame_bgr: NDArray[np.uint8]) -> object:
+        """Submit one frame; block until its Results object is ready."""
+        fut: Future[object] = Future()
+        self._q.put((frame_bgr, fut))
+        return fut.result()
+
+    def _loop(self) -> None:
+        import queue
+
+        while True:
+            frame, fut = self._q.get()  # block for the first frame of a batch
+            batch = [(frame, fut)]
+            deadline = time.monotonic() + self.window_s
+            while len(batch) < self.max_batch:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    batch.append(self._q.get(timeout=remaining))
+                except queue.Empty:
+                    break
+            try:
+                model, device = _load_model()
+                results = model.predict(  # type: ignore[attr-defined]
+                    [b[0] for b in batch],
+                    device=device,
+                    conf=self.conf,
+                    iou=self.iou,
+                    imgsz=self.imgsz,
+                    half=self.half and device.startswith("cuda"),
+                    classes=[PERSON_CLASS],
+                    verbose=False,
+                )
+            except Exception as e:  # noqa: BLE001 — deliver to callers, keep collecting
+                for _, f in batch:
+                    if not f.done():
+                        f.set_exception(e)
+                continue
+            for i, (_, f) in enumerate(batch):
+                if not f.done():
+                    f.set_result(results[i] if i < len(results) else None)
 
 
 def get_device() -> str | None:

@@ -173,6 +173,14 @@ class Settings(BaseSettings):
     # BOTH still and track-free — nights/slow hours stop costing GPU. Critical
     # headroom on edge Jetson boxes. Disable to A/B or debug detection.
     motion_gate: bool = True
+    # Cross-camera micro-batching (yolo_runner._PoseBatcher): concurrent
+    # cameras' frames ride ONE GPU predict instead of serializing on the
+    # predict lock. window = how long the collector waits to fill a batch
+    # (adds ≤ this much latency per inference — trivial next to the frame
+    # budget); max = batch size cap. Disable to fall back to per-frame predict.
+    yolo_batch: bool = True
+    yolo_batch_window_ms: float = 10.0
+    yolo_batch_max: int = 8
 
     # Cross-camera re-ID embedder (#4). "histogram" = dependency-light color
     # histogram (default, weak). "osnet" = learned torchreid OSNet (robust, needs
