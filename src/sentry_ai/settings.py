@@ -169,6 +169,10 @@ class Settings(BaseSettings):
     # FP16 inference on CUDA (~2× faster on RTX-class GPUs, negligible accuracy
     # loss). Ignored on CPU. Set false to A/B against FP32 when debugging.
     yolo_half: bool = True
+    # Motion gate (live_worker/motion_gate.py): skip YOLO while the scene is
+    # BOTH still and track-free — nights/slow hours stop costing GPU. Critical
+    # headroom on edge Jetson boxes. Disable to A/B or debug detection.
+    motion_gate: bool = True
 
     # Cross-camera re-ID embedder (#4). "histogram" = dependency-light color
     # histogram (default, weak). "osnet" = learned torchreid OSNet (robust, needs

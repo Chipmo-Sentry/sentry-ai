@@ -27,10 +27,11 @@ from sentry_ai.live_worker.demographics import (
     TrackDemographics,
     make_track_demographics,
 )
-from sentry_ai.live_worker.staff import TrackStaff, make_track_staff
 from sentry_ai.live_worker.emitter import MetadataEmitter
+from sentry_ai.live_worker.motion_gate import MotionGate
 from sentry_ai.live_worker.reid import Embedder, StorePersonRegistry
 from sentry_ai.live_worker.schemas import FrameMetadata, ItemPayload, TrackPayload
+from sentry_ai.live_worker.staff import TrackStaff, make_track_staff
 from sentry_ai.live_worker.tracker import ByteTrackWrapper, TrackedDetection
 from sentry_ai.live_worker.yolo_det import Item, YoloItemRunner
 from sentry_ai.live_worker.yolo_runner import YoloPoseRunner
@@ -299,6 +300,7 @@ class CameraWorker:
         self._frames_processed = 0  # frames that PASSED frame_skip → YOLO ran
         self._detections_total = 0
         self._persons_this_frame = 0  # persons in the latest analyzed frame (for heartbeat)
+        self._last_track_count = 0  # tracks in the latest analyzed frame (motion gate)
         self._last_stats_log = 0.0  # monotonic ts of last yolo_stats log
         self._capture_times: deque[float] = deque(maxlen=200)  # for fps_capture
         self._inference_times: deque[float] = deque(maxlen=200)  # for fps_inference
@@ -310,6 +312,10 @@ class CameraWorker:
         self._item_runner: YoloItemRunner | None = None
         self._tracker: ByteTrackWrapper | None = None
         self._scorer: BehaviorScorer | None = None
+        # Skips YOLO on still+empty scenes (nights). Cheap enough to construct
+        # eagerly; consults settings once so tests can monkeypatch env.
+
+        self._motion_gate = MotionGate(enabled=get_settings().motion_gate)
         # docs/30 F5 — per-track visitor gender/age votes (CPU). None = disabled
         # or models unavailable; the worker runs identically without it.
         self._demographics: TrackDemographics | None = None
@@ -592,9 +598,17 @@ class CameraWorker:
         # cadence / scan interval). frame_skip is applied in the read loop.
         self._sync_detection_config()
 
+        # Still + empty scene → skip the detector entirely (motion_gate.py).
+        # The gate keeps a ~1/s safety-net cadence, and any motion or live
+        # track reopens full rate on the same frame it appears.
+        gate = self._motion_gate.observe(frame_bgr, active_tracks=self._last_track_count)
+        if not gate.infer:
+            return
+
         h, w = frame_bgr.shape[:2]
         detections = self._yolo.detect_persons(frame_bgr)
         tracked = self._tracker.update(detections)
+        self._last_track_count = len(tracked)
         now = time.monotonic()
         self._inference_times.append(now)
         self._frames_processed += 1
@@ -638,6 +652,8 @@ class CameraWorker:
                 yolo_conf=round(self._yolo.conf, 2),
                 fps_capture=round(self.fps_capture, 1),
                 fps_inference=round(self.fps_inference, 1),
+                gate_idle=gate.idle,
+                gate_skipped_total=self._motion_gate.gated_total,
             )
 
         # Item detection on every Nth inference cycle (items don't move much).
