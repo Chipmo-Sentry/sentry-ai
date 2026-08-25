@@ -64,6 +64,10 @@ class TrackPayload(BaseModel):
     # backend aggregator can exclude staff from visitor KPIs/paths/heatmap.
     # Alerts are NOT suppressed for staff (internal theft stays monitored).
     is_staff: bool = Field(default=False)
+    # Mannequin filter (mannequin.py): in a drawn mannequin zone, or motionless
+    # past the stillness threshold. Excluded from visitor counts, breaches and
+    # VLM scans downstream; releases the moment the track genuinely moves.
+    is_mannequin: bool = Field(default=False)
 
 
 class ItemPayload(BaseModel):

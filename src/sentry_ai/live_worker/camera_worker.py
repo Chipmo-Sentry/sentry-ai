@@ -28,6 +28,7 @@ from sentry_ai.live_worker.demographics import (
     make_track_demographics,
 )
 from sentry_ai.live_worker.emitter import MetadataEmitter
+from sentry_ai.live_worker.mannequin import MannequinFilter
 from sentry_ai.live_worker.motion_gate import MotionGate
 from sentry_ai.live_worker.reid import Embedder, StorePersonRegistry
 from sentry_ai.live_worker.schemas import FrameMetadata, ItemPayload, TrackPayload
@@ -316,6 +317,9 @@ class CameraWorker:
         # eagerly; consults settings once so tests can monkeypatch env.
 
         self._motion_gate = MotionGate(enabled=get_settings().motion_gate)
+        # Marks mannequins (drawn zone / long stillness) so they don't count as
+        # visitors, accumulate risk downstream, or burn VLM scans.
+        self._mannequin = MannequinFilter()
         # docs/30 F5 — per-track visitor gender/age votes (CPU). None = disabled
         # or models unavailable; the worker runs identically without it.
         self._demographics: TrackDemographics | None = None
@@ -640,6 +644,7 @@ class CameraWorker:
         # detector + conf threshold are live. Grep `camera.yolo_stats` in logs.
         if now - self._last_stats_log >= _STATS_LOG_SEC:
             self._last_stats_log = now
+            self._mannequin.prune()
             log.info(
                 "camera.yolo_stats",
                 camera_id=self.camera_id,
@@ -673,9 +678,11 @@ class CameraWorker:
             # Normalize against THIS frame's w,h (risk #3: real frame, not nominal
             # res). Skip the test entirely when the camera has no zones.
             in_zones: set[str] | None = None
+            foot_nx = ((t.box[0] + t.box[2]) / 2.0) / max(1, w)
+            foot_ny = t.box[3] / max(1, h)
             if self._compiled_zones:
-                foot_x = (t.box[0] + t.box[2]) / 2.0
-                in_zones = zones_at(foot_x / max(1, w), t.box[3] / max(1, h), self._compiled_zones)
+                in_zones = zones_at(foot_nx, foot_ny, self._compiled_zones)
+            is_mannequin = self._mannequin.observe(t.tracker_id, foot_nx, foot_ny, in_zones)
             result = self._scorer.score(
                 t.tracker_id,
                 t.keypoints,
@@ -738,6 +745,7 @@ class CameraWorker:
                     gender=demo.get(t.tracker_id, (None, None))[0],
                     age_band=demo.get(t.tracker_id, (None, None))[1],
                     is_staff=is_staff,
+                    is_mannequin=is_mannequin,
                 ),
             )
 
@@ -746,7 +754,7 @@ class CameraWorker:
             # dead knob). The periodic scan below picks the most suspicious
             # eligible one (per-person cooldown applies); the AI decides — the
             # behaviour engine no longer GATES alerts, it only prioritises.
-            if risk_pct >= self._alert_threshold_pct:
+            if risk_pct >= self._alert_threshold_pct and not is_mannequin:
                 scan_candidates.append((risk_pct, t.tracker_id, result))
 
         # Periodic stale-track cleanup (~once per second @ 5 FPS)
