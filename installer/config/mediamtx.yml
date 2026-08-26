@@ -42,7 +42,7 @@ pathDefaults:
   record: yes
   recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
   recordFormat: fmp4
-  recordSegmentDuration: 1h
+  recordSegmentDuration: 30s
   recordDeleteAfter: 24h
 
 # MediaMTX v1.10+ rejects unknown paths without an explicit catch-all —
