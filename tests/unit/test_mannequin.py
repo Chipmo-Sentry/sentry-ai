@@ -31,6 +31,37 @@ def test_moving_person_never_latches() -> None:
         assert f.observe(3, 0.05 * i, 0.5, {"shelf"}, now=float(i * 10)) is False
 
 
+def test_spot_bank_survives_track_churn() -> None:
+    """The real-store failure: the detector blinks on a dark mannequin, the
+    tracker mints a fresh id each time, and a per-track timer restarts forever.
+    Still-seconds must accumulate on the SPOT across ids."""
+    f = MannequinFilter(still_after_sec=60.0)
+    # Track 10 stands still 0→40s (1s frames, dt capped at 2s), then vanishes.
+    for t in range(41):
+        f.observe(10, 0.30, 0.70, None, now=float(t))
+    # Successor track 11 at the same spot: banks the remaining seconds and
+    # latches WELL before its own 60s timer would.
+    latched_at = None
+    for t in range(45, 90):
+        if f.observe(11, 0.305, 0.70, None, now=float(t)):
+            latched_at = t
+            break
+    assert latched_at is not None and latched_at < 70
+
+
+def test_departing_person_clears_spot_bank() -> None:
+    """A checkout queue must not accumulate one shopper at a time: whoever
+    WALKS away voids the bank their standing built up."""
+    f = MannequinFilter(still_after_sec=60.0)
+    for t in range(41):
+        f.observe(20, 0.5, 0.5, None, now=float(t))
+    f.observe(20, 0.8, 0.5, None, now=41.0)  # walks away → bank cleared
+    # The next person pausing there starts from zero: still not latched after
+    # standing 45s (41+45 > 60 would have latched off a stale bank).
+    for t in range(50, 96):
+        assert f.observe(21, 0.5, 0.5, None, now=float(t)) is False
+
+
 def test_prune_forgets_stale_tracks() -> None:
     f = MannequinFilter(still_after_sec=10.0)
     f.observe(4, 0.5, 0.5, {"mannequin"}, now=0.0)
