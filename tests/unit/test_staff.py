@@ -124,6 +124,42 @@ def test_color_change_resets_votes() -> None:
     assert out[4] is False
 
 
+def test_store_color_overrides_node_global() -> None:
+    """A per-store color wins over the node-global one: the node says orange,
+    but this store's workers use blue, so a blue lanyard locks staff."""
+    ts = _make(store_color="blue")  # node-global is "orange" (fixture)
+    t = FakeTrack(11)
+    frame = _frame_with_chest_patch((255, 0, 0))  # blue in BGR
+    out = {}
+    for i in range(4):
+        out = ts.observe(frame, [t], i)
+    assert out[11] is True
+
+
+def test_store_color_ignores_node_global_color() -> None:
+    """With a store color set, the node-global orange is NOT matched — an orange
+    lanyard is a visitor at a store whose staff wear blue."""
+    ts = _make(store_color="blue")
+    t = FakeTrack(12)
+    frame = _frame_with_chest_patch((0, 106, 255))  # orange in BGR
+    out = {}
+    for i in range(10):
+        out = ts.observe(frame, [t], i)
+    assert out[12] is False
+
+
+def test_no_store_color_falls_back_to_node_global() -> None:
+    """Without a store color, the node-global color still applies (single-store
+    deployments keep working unchanged)."""
+    ts = _make(store_color=None)  # node-global "orange" from the fixture
+    t = FakeTrack(13)
+    frame = _frame_with_chest_patch((0, 106, 255))  # orange
+    out = {}
+    for i in range(4):
+        out = ts.observe(frame, [t], i)
+    assert out[13] is True
+
+
 def test_registry_staff_latch() -> None:
     reg = StorePersonRegistry()
     emb = np.ones(8, dtype=np.float32)

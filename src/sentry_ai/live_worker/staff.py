@@ -236,6 +236,7 @@ class TrackStaff:
         color_only_hits: int = 8,
         max_attempts: int = 60,
         vlm_verify: bool = True,
+        store_color: str | None = None,
     ) -> None:
         self.every_n = max(1, every_n)
         self.max_per_frame = max(1, max_per_frame)
@@ -244,6 +245,10 @@ class TrackStaff:
         self.color_only_hits = max(self.min_hits, color_only_hits)
         self.max_attempts = max_attempts
         self.vlm_verify = vlm_verify
+        # Per-store badge color (one node serves many stores, each may issue a
+        # different-colored lanyard). Wins over the node-global color; None →
+        # fall back to the node-global `staff_badge_color`.
+        self.store_color = store_color.strip().lower() if store_color and store_color.strip() else None
         self._states: dict[int, _TrackState] = {}
         self._gate: _VlmGate | None = None
         # The parsed color currently in effect; re-parsed when config changes.
@@ -254,10 +259,15 @@ class TrackStaff:
         self._last_stats_log = time.monotonic()
 
     def _sync_color(self) -> bool:
-        """Re-read the central badge color; True when staff detection is active."""
+        """Re-read the effective badge color; True when staff detection is active.
+
+        The store's own color (from this worker's provision) wins; otherwise the
+        node-global `staff_badge_color` applies — so a single-store deployment
+        keeps working with just the node color, while a multi-store node can give
+        each store a distinct lanyard."""
         from sentry_ai.runtime_config import get_staff_badge_color  # noqa: PLC0415
 
-        spec = get_staff_badge_color()
+        spec = self.store_color or get_staff_badge_color()
         if spec != self._color_spec:
             self._color_spec = spec
             self._hsv = parse_badge_color(spec) if spec else None
@@ -364,11 +374,12 @@ def _person_jpeg(frame_bgr: NDArray[np.uint8], box: Box) -> bytes | None:
     return bytes(buf) if ok else None
 
 
-def make_track_staff() -> TrackStaff | None:
+def make_track_staff(store_color: str | None = None) -> TrackStaff | None:
     """Build the per-camera staff vote cache from settings, or None when disabled.
 
     Even when enabled this is inert (zero per-frame cost beyond a dict lookup)
-    until a central `staff_badge_color` is configured.
+    until a badge color is configured — either this store's `store_color` or the
+    node-global `staff_badge_color`.
     """
     from sentry_ai.settings import get_settings  # noqa: PLC0415 — avoid import cycle
 
@@ -383,4 +394,5 @@ def make_track_staff() -> TrackStaff | None:
         color_only_hits=s.staff_color_only_hits,
         max_attempts=s.staff_max_attempts,
         vlm_verify=s.staff_vlm_verify,
+        store_color=store_color,
     )

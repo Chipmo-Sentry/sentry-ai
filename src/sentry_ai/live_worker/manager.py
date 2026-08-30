@@ -47,6 +47,7 @@ class LiveWorkerManager:
         store_id: str | None = None,
         alert_threshold_pct: float | None = None,
         zones: list[dict[str, object]] | None = None,
+        staff_badge_color: str | None = None,
     ) -> None:
         with self._lock:
             if not self._emitter_started:
@@ -63,6 +64,7 @@ class LiveWorkerManager:
                     existing.rtsp_url == rtsp_url
                     and existing.alert_threshold_pct == alert_threshold_pct
                     and existing.zones == (zones or None)
+                    and existing.staff_badge_color == staff_badge_color
                 ):
                     log.info("manager.already_running", camera_id=camera_id)
                     return
@@ -82,6 +84,7 @@ class LiveWorkerManager:
                 embedder=self._embedder if registry is not None else None,
                 alert_threshold_pct=alert_threshold_pct,
                 zones=zones,
+                staff_badge_color=staff_badge_color,
             )
             worker.start()
             self._workers[camera_id] = worker
@@ -107,6 +110,7 @@ class LiveWorkerManager:
                     "store_id": store_id,
                     "alert_threshold_pct": alert_threshold_pct,
                     "zones": zones,
+                    "staff_badge_color": staff_badge_color,
                 },
             )
 

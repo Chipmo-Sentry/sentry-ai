@@ -264,9 +264,13 @@ class CameraWorker:
         embedder: Embedder | None = None,
         alert_threshold_pct: float | None = None,
         zones: list[dict[str, object]] | None = None,
+        staff_badge_color: str | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
+        # Per-store staff lanyard color (staff.py). None → the worker uses the
+        # node-global `staff_badge_color`. Kept for the manager's restart check.
+        self.staff_badge_color = staff_badge_color
         # docs/29 P1c — per-camera detection zones. `zones` keeps the raw list for
         # the manager's restart-on-change check; `_compiled_zones` is the
         # {type: [polygon]} form the per-frame point-in-zone test uses.
@@ -489,7 +493,7 @@ class CameraWorker:
             # Returns None when disabled/unavailable (never raises) — the first
             # node start downloads ~48 MB of pinned ONNX into the model dir.
             self._demographics = make_track_demographics()
-            self._staff = make_track_staff()
+            self._staff = make_track_staff(store_color=self.staff_badge_color)
             # Apply any config the poller delivered while we were initializing.
             if self._pending_weights is not None:
                 self._scorer.update_weights(self._pending_weights)

@@ -49,6 +49,7 @@ def start(req: LiveStartRequest) -> dict[str, str]:
         store_id=req.store_id,
         alert_threshold_pct=req.risk_threshold,
         zones=zones,
+        staff_badge_color=req.staff_badge_color,
     )
     return {"camera_id": req.camera_id, "status": "starting"}
 

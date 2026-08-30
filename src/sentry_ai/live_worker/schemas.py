@@ -130,6 +130,9 @@ class LiveStartRequest(BaseModel):
     # docs/29 P1c — per-camera detection zones; drive the zone-aware criteria
     # (exit_after_concealment / repeated_shelf_visit). None/empty → no zone scoring.
     zones: list[Zone] | None = Field(default=None)
+    # Per-store staff lanyard color (named or #rrggbb). None → the worker falls
+    # back to the node-global `staff_badge_color`.
+    staff_badge_color: str | None = Field(default=None, max_length=16)
 
 
 class LiveWorkerStatus(BaseModel):
