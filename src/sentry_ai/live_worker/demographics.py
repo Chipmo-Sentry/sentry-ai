@@ -85,12 +85,17 @@ _GENDERS: tuple[Gender, ...] = ("male", "female")  # gender_googlenet output ord
 
 # Head-region heuristic: the face lives in the top fraction of the person box.
 # Full box width (heads tilt/turn); a little horizontal pad for edge crops.
-_HEAD_FRAC = 0.35
+# 0.45 (was 0.35): overhead/angled store cameras put the face lower in the box,
+# so a taller head region catches faces the tighter crop missed.
+_HEAD_FRAC = 0.45
 _HEAD_PAD_FRAC = 0.10
 # YuNet input is capped at this max dimension — detection runs on the small
 # image, classification crops from the full-res one.
 _DET_MAX_DIM = 320
-_FACE_SCORE_MIN = 0.7
+# 0.6 (was 0.7): store faces are often small/angled/dim — a slightly lower
+# detection floor recovers many visitors who were left "unknown". The
+# probability-weighted vote average absorbs the occasional weaker read.
+_FACE_SCORE_MIN = 0.6
 # Margin added around the detected face before the 224x224 classifier resize.
 _FACE_MARGIN_FRAC = 0.15
 _CLS_INPUT = (224, 224)

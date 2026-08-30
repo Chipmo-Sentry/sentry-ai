@@ -196,17 +196,20 @@ class Settings(BaseSettings):
     # Models download once, SHA-256 pinned, into demographics_model_dir.
     demographics_enabled: bool = True
     demographics_model_dir: str = "models"
-    # Per-track attempt cadence in ANALYZED frames (~2 s at 5 FPS inference)
+    # Per-track attempt cadence in ANALYZED frames (~1.2 s at 5 FPS inference)
     # plus a per-frame attempt cap so a crowded frame can't stall the loop.
-    demographics_every_n: int = 10
-    demographics_max_per_frame: int = 2
-    # A track's labels emit only after min_votes agreeing samples (the backend
-    # counts first-wins per person) and LOCK at max_votes — demographics are an
+    # Tuned for COVERAGE (fewer "unknown" visitors): a shopper often faces the
+    # camera only briefly, so we try more often and let ONE usable face label
+    # them (min_votes=1). Extra votes still refine the weighted label.
+    demographics_every_n: int = 6
+    demographics_max_per_frame: int = 3
+    # A track's labels emit after min_votes samples (the backend counts
+    # first-wins per person) and LOCK at max_votes — demographics are an
     # attribute, not per-frame state, so a locked track is never re-classified.
-    demographics_min_votes: int = 2
+    demographics_min_votes: int = 1
     demographics_max_votes: int = 5
     # Faces smaller than this (source pixels) are too far to classify reliably.
-    demographics_min_face_px: int = 24
+    demographics_min_face_px: int = 18
 
     # --- Staff identification via neck-badge color (live_worker/staff.py) ---
     # Master switch. The feature additionally requires a badge color configured
