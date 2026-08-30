@@ -51,6 +51,32 @@ def _should_push_theft_clip(output: Any) -> bool:
     return output.category.value in _THEFT_CATEGORIES and output.confidence >= _THEFT_SAVE_CONF
 
 
+# Mongolian labels for the behavior-engine signals, so the VLM hint reads as
+# plain analyst language ("гар цээж рүү") instead of raw keys.
+_BEHAVIOR_LABELS_MN: dict[str, str] = {
+    "looking_around": "эргэн тойрноо ажиглах",
+    "loitering": "удаан зогсох",
+    "rapid_movement": "хурдан хөдөлгөөн",
+    "item_pickup": "бараа авах",
+    "body_block": "биеэрээ халхлах",
+    "crouch": "бөхийх",
+    "wrist_to_torso": "гар цээж/бэлхүүс рүү",
+    "bag_interaction": "цүнхтэй харьцах",
+    "pocket_interaction": "халаастай харьцах",
+    "repeated_shelf_visit": "нэг тавиур руу дахин дахин очих",
+    "exit_after_concealment": "нуусны дараа гарц руу явах",
+}
+
+
+def _behavior_hint_mn(behaviors: list[str], peak_risk_pct: float) -> str | None:
+    """Short Mongolian summary of the edge signals for the VLM prompt, or None
+    when there's nothing specific to say (a bare risk number isn't a hint)."""
+    labels = [_BEHAVIOR_LABELS_MN.get(b, b) for b in behaviors[:4]]
+    if not labels:
+        return None
+    return f"{', '.join(labels)} (эрсдэл {round(peak_risk_pct)}%)"
+
+
 def submit_breach(
     *,
     mediamtx_path: str,
@@ -234,7 +260,10 @@ async def _cut_verify_push(
     try:
         provider = get_provider(resolve_provider_name(None), client)
         output, latency_ms, _frames = await verify_clip(
-            clip_path=Path(cut.storage_path), provider=provider, store_context=None
+            clip_path=Path(cut.storage_path),
+            provider=provider,
+            store_context=None,
+            behavior_hint=_behavior_hint_mn(behaviors, peak_risk_pct),
         )
     except Exception as e:  # noqa: BLE001 — docs/33 P0-5: a VLM outage must not orphan
         # Transport/unexpected VLM failure (verify_clip already retried a cold

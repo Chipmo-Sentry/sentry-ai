@@ -20,8 +20,15 @@ async def verify_clip(
     clip_path: Path,
     provider: VLMProvider,
     store_context: str | None = None,
+    behavior_hint: str | None = None,
 ) -> tuple[VLMOutput, int, int]:
-    """Run Stage 2 on a clip. Returns (output, latency_ms, frames_used)."""
+    """Run Stage 2 on a clip. Returns (output, latency_ms, frames_used).
+
+    `behavior_hint` is a short Mongolian summary of what the edge behavior
+    engine already flagged (e.g. which concealment signals + peak risk); it
+    focuses the VLM on the suspected moment WITHOUT letting the hint alone
+    decide — the prompt still requires the action to be visible in the frames.
+    """
     settings = get_settings()
     from sentry_ai.runtime_config import resolve_frame_max_dim, resolve_frames_per_clip
 
@@ -38,7 +45,12 @@ async def verify_clip(
         quality=settings.frame_jpeg_quality,
     )
 
-    prompt = render_prompt("verify_v1.j2", store_context=store_context, frame_count=frames_per_clip)
+    prompt = render_prompt(
+        "verify_v1.j2",
+        store_context=store_context,
+        frame_count=frames_per_clip,
+        behavior_hint=behavior_hint,
+    )
 
     from sentry_ai import runtime_config
 
