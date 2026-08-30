@@ -62,7 +62,12 @@ _NAMED_HSV: dict[str, int] = {
 }
 _HUE_TOL = 12  # ± around the center (red wraps)
 _SAT_MIN = 90  # badge lanyards are saturated; grays/whites never match
-_VAL_MIN = 60
+_VAL_MIN = 45  # dim-but-color footage still matches (lowered from 60 for dark stores)
+# When the chest crop's mean saturation is below this, the footage is effectively
+# grayscale (IR night mode / very dim) and hue is meaningless — color matching
+# can't work at all. Such tracks are routed straight to the VLM instead, which
+# can still read a badge/lanyard by shape. Color-only locking is disabled here.
+_GRAYSCALE_SAT_MAX = 35
 
 # Forget a track's vote state this long after it was last seen.
 _STATE_TTL_SEC = 60.0
@@ -75,6 +80,12 @@ _PROMPT = (
     "Look at the person in the image. Are they wearing a staff ID badge or "
     "lanyard around their neck in a {color} color? Answer strictly as JSON: "
     '{{"badge": true}} or {{"badge": false}}.'
+)
+# Grayscale/IR frames carry no color — ask about the badge/lanyard by shape.
+_PROMPT_PLAIN = (
+    "Look at the person in the image. Are they wearing a staff ID badge or "
+    "lanyard on a strap around their neck? Answer strictly as JSON: "
+    '{"badge": true} or {"badge": false}.'
 )
 
 
@@ -154,6 +165,17 @@ def _color_frac(frame_bgr: NDArray[np.uint8], chest: Box, hsv_target: tuple[int,
     return float(np.count_nonzero(mask)) / float(mask.size)
 
 
+def _chest_mean_saturation(frame_bgr: NDArray[np.uint8], chest: Box) -> float:
+    """Mean HSV saturation of the chest crop — low ⇒ grayscale/IR (no usable hue)."""
+    h, w = frame_bgr.shape[:2]
+    cx1, cy1 = max(0, int(chest[0])), max(0, int(chest[1]))
+    cx2, cy2 = min(w, int(chest[2])), min(h, int(chest[3]))
+    if cx2 - cx1 < 4 or cy2 - cy1 < 4:
+        return 255.0  # too small to judge → treat as "color present", skip gray path
+    hsv = cv2.cvtColor(frame_bgr[cy1:cy2, cx1:cx2], cv2.COLOR_BGR2HSV)
+    return float(hsv[:, :, 1].mean())
+
+
 class _TrackLike(Protocol):
     """The slice of TrackedDetection this module needs (keeps imports light)."""
 
@@ -174,6 +196,9 @@ class _TrackState:
     # None = undecided; True/False = locked (VLM verdict, or color-only lock).
     locked: bool | None = None
     vlm_asked: bool = False
+    # This track has only been seen on grayscale/IR frames — color is unusable,
+    # so it must be VLM-confirmed (never color-only locked).
+    grayscale: bool = False
 
 
 class _VlmGate:
@@ -188,15 +213,15 @@ class _VlmGate:
 
     def __init__(self, color_name: str) -> None:
         self.color_name = color_name
-        self._q: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=8)
+        self._q: queue.Queue[tuple[int, bytes, bool]] = queue.Queue(maxsize=8)
         self._verdicts: dict[int, bool] = {}
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="staff-vlm", daemon=True)
         self._thread.start()
 
-    def submit(self, key: int, jpeg: bytes) -> bool:
+    def submit(self, key: int, jpeg: bytes, grayscale: bool = False) -> bool:
         try:
-            self._q.put_nowait((key, jpeg))
+            self._q.put_nowait((key, jpeg, grayscale))
         except queue.Full:
             return False
         return True
@@ -209,10 +234,10 @@ class _VlmGate:
         from sentry_ai.providers.oneshot import ask_json  # noqa: PLC0415 — import cycle
 
         while True:
-            key, jpeg = self._q.get()
-            reply = ask_json(
-                _PROMPT.format(color=self.color_name), jpeg, timeout_sec=_VLM_TIMEOUT_SEC
-            )
+            key, jpeg, grayscale = self._q.get()
+            # Grayscale/IR footage has no color to ask about → shape-only prompt.
+            prompt = _PROMPT_PLAIN if grayscale else _PROMPT.format(color=self.color_name)
+            reply = ask_json(prompt, jpeg, timeout_sec=_VLM_TIMEOUT_SEC)
             if reply is None or not isinstance(reply.get("badge"), bool):
                 continue  # unreachable/unparseable → no verdict; color-only path decides
             with self._lock:
@@ -313,21 +338,31 @@ class TrackStaff:
             st.last_attempt_frame = frame_idx
             st.attempts += 1
             self._attempts += 1
-            frac = _color_frac(frame_bgr, _chest_box(t.box, t.keypoints), self._hsv)
-            if frac < self.frac_threshold:
-                continue
-            st.hits += 1
-            self._hits_total += 1
+            chest = _chest_box(t.box, t.keypoints)
+            # Grayscale/IR chest → hue is meaningless; count the sighting toward
+            # candidacy and force VLM verification (shape, not color). Otherwise
+            # the usual color-fraction hit.
+            if _chest_mean_saturation(frame_bgr, chest) < _GRAYSCALE_SAT_MAX:
+                st.grayscale = True
+                st.hits += 1
+            else:
+                st.grayscale = False
+                frac = _color_frac(frame_bgr, chest, self._hsv)
+                if frac < self.frac_threshold:
+                    continue
+                st.hits += 1
+                self._hits_total += 1
             if st.hits < self.min_hits:
                 continue
             # Candidate. VLM confirms when available; color-only locks at the
-            # stricter threshold so an offline edge box still labels staff.
+            # stricter threshold so an offline edge box still labels staff — but
+            # NEVER for a grayscale track, where color evidence doesn't exist.
             if self.vlm_verify and self._gate is not None and not st.vlm_asked:
                 jpeg = _person_jpeg(frame_bgr, t.box)
-                if jpeg is not None and self._gate.submit(t.tracker_id, jpeg):
+                if jpeg is not None and self._gate.submit(t.tracker_id, jpeg, st.grayscale):
                     st.vlm_asked = True
                     continue
-            if st.hits >= self.color_only_hits:
+            if not st.grayscale and st.hits >= self.color_only_hits:
                 st.locked = True
                 log.info("staff.color_only_lock", hits=st.hits)
 

@@ -160,6 +160,43 @@ def test_no_store_color_falls_back_to_node_global() -> None:
     assert out[13] is True
 
 
+def test_grayscale_never_color_only_locks() -> None:
+    """On grayscale/IR footage color is unusable, so an edge box (VLM off) must
+    NOT color-only-lock — otherwise every tracked person becomes 'staff'."""
+    ts = _make(vlm_verify=False)  # color_only_hits=3
+    t = FakeTrack(20)
+    gray = _frame_with_chest_patch(None)  # solid gray chest, saturation 0
+    out = {}
+    for i in range(12):
+        out = ts.observe(gray, [t], i)
+    assert out[20] is False
+
+
+def test_grayscale_routes_to_vlm_and_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the VLM available, a grayscale track is sent to it (shape prompt) and
+    a positive verdict locks it staff — staff ID keeps working in dark stores."""
+    import sentry_ai.providers.oneshot as oneshot
+
+    seen_prompts: list[str] = []
+
+    def _fake_ask_json(prompt: str, jpeg: bytes, timeout_sec: float = 0.0) -> dict:
+        seen_prompts.append(prompt)
+        return {"badge": True}
+
+    monkeypatch.setattr(oneshot, "ask_json", _fake_ask_json)
+    ts = _make(vlm_verify=True, min_hits=2)
+    t = FakeTrack(21)
+    gray = _frame_with_chest_patch(None)
+    out = {}
+    for i in range(20):
+        out = ts.observe(gray, [t], i)
+        if out.get(21):
+            break
+    assert out[21] is True
+    # The grayscale prompt (no color word) was used, not the color one.
+    assert seen_prompts and all("color" not in p for p in seen_prompts)
+
+
 def test_registry_staff_latch() -> None:
     reg = StorePersonRegistry()
     emb = np.ones(8, dtype=np.float32)
