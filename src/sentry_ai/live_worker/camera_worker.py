@@ -840,6 +840,7 @@ class CameraWorker:
             episode_started_ms=episode_ms,
             breach_ts_ms=int(time.time() * 1000),
             pose_sequence=self._build_pose_sequence(tracker_id) or None,
+            store_id=self.store_id,
         )
 
     def _capture_pose(self, tracked: list[TrackedDetection]) -> None:

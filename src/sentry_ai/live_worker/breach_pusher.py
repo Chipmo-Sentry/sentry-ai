@@ -88,6 +88,7 @@ def submit_breach(
     episode_started_ms: int | None,
     breach_ts_ms: int,
     pose_sequence: list[dict[str, Any]] | None = None,
+    store_id: str | None = None,
 ) -> None:
     """Fire-and-forget: queue a breach for cut+VLM+push. Never blocks the caller."""
     # Topology is backend-authoritative (ADR-0026): the node pushes only when the
@@ -113,6 +114,7 @@ def submit_breach(
         episode_started_ms,
         breach_ts_ms,
         pose_sequence,
+        store_id,
     )
 
 
@@ -126,6 +128,7 @@ def _handle(
     episode_started_ms: int | None,
     breach_ts_ms: int,
     pose_sequence: list[dict[str, Any]] | None = None,
+    store_id: str | None = None,
 ) -> None:
     try:
         asyncio.run(
@@ -139,6 +142,7 @@ def _handle(
                 episode_started_ms,
                 breach_ts_ms,
                 pose_sequence,
+                store_id,
             )
         )
     except Exception:  # noqa: BLE001 — a breach failure must never kill the worker
@@ -214,6 +218,7 @@ async def _cut_verify_push(
     episode_started_ms: int | None,
     breach_ts_ms: int,
     pose_sequence: list[dict[str, Any]] | None = None,
+    store_id: str | None = None,
 ) -> None:
     from sentry_ai import clip_cutter, rag
     from sentry_ai.pipeline.verifier import verify_clip
@@ -257,13 +262,24 @@ async def _cut_verify_push(
         num_predict=settings.vlm_num_predict,
     )
     _verify_t0 = time.monotonic()
+    # RAG few-shot (docs/19 Phase 4): pull this store's past staff-verified cases
+    # most similar to the current behavior signature, so the VLM sees "here's how
+    # staff judged similar events here". Best-effort — None (embed model/Ollama
+    # down, or no cases yet) simply falls back to no store context.
+    behavior_hint = _behavior_hint_mn(behaviors, peak_risk_pct)
+    rag_context: str | None = None
+    if behavior_hint:
+        try:
+            rag_context = await rag.retrieve_context(store_id, behavior_hint)
+        except Exception as e:  # noqa: BLE001 — RAG must never break a verdict
+            log.info("breach_push.rag_retrieve_failed", error=str(e))
     try:
         provider = get_provider(resolve_provider_name(None), client)
         output, latency_ms, _frames = await verify_clip(
             clip_path=Path(cut.storage_path),
             provider=provider,
-            store_context=None,
-            behavior_hint=_behavior_hint_mn(behaviors, peak_risk_pct),
+            store_context=rag_context,
+            behavior_hint=behavior_hint,
         )
     except Exception as e:  # noqa: BLE001 — docs/33 P0-5: a VLM outage must not orphan
         # Transport/unexpected VLM failure (verify_clip already retried a cold
